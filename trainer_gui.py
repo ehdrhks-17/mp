@@ -98,7 +98,7 @@ class TrainerGUI(QWidget):
             
         QMessageBox.information(self, "알림", "학습을 시작합니다. 프롬프트(CMD) 창에서 진행 상황을 확인하세요.\n(사양에 따라 몇 분 정도 소요됩니다.)")
         # 학습 시작 (CMD 창 띄움)
-        os.system(f'start cmd /k "{sys.executable} train.py"')
+        os.system(f'start cmd /k "{sys.executable} train.py {name}"')
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)

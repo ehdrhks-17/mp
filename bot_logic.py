@@ -15,7 +15,7 @@ class BotThread(QThread):
         
         # 가중치 파일 로드
         ai_file = settings['ai_file']
-        model_path = os.path.join(os.getcwd(), ai_file) if ai_file != "기본 YOLO 모델 (yolov8n.pt)" else 'yolov8n.pt'
+        model_path = os.path.join(os.getcwd(), "mobs", ai_file) if ai_file != "기본 YOLO 모델 (yolov8n.pt)" else 'yolov8n.pt'
         self.vision = VisionAgent(yolo_model_path=model_path)
         
         # 맵 데이터 로드

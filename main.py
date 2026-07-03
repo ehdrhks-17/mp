@@ -16,6 +16,7 @@ class MainGUI(QWidget):
         self.bot_thread = None
         
         os.makedirs("maps", exist_ok=True)
+        os.makedirs("mobs", exist_ok=True)
         self.initUI()
         self.refresh_lists()
 
@@ -141,7 +142,7 @@ class MainGUI(QWidget):
             self.map_combo.addItem("저장된 맵이 없습니다.")
             
         self.ai_combo.clear()
-        pt_files = glob.glob("*.pt")
+        pt_files = glob.glob(os.path.join("mobs", "*.pt"))
         if pt_files:
             for f in pt_files:
                 self.ai_combo.addItem(os.path.basename(f))

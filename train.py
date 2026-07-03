@@ -21,7 +21,7 @@ names:
     
     return yaml_path
 
-def train_model():
+def train_model(output_name="best"):
     print("🚀 학습 준비 중...")
     yaml_path = create_yaml()
     
@@ -54,14 +54,20 @@ def train_model():
         latest_train = max(train_folders, key=lambda x: os.path.getctime(os.path.join(runs_dir, x)))
         
         best_pt_path = os.path.join(runs_dir, latest_train, "weights", "best.pt")
-        dest_path = os.path.join(os.path.abspath(os.path.dirname(__file__)), "best.pt")
+        dest_dir = os.path.join(os.path.abspath(os.path.dirname(__file__)), "mobs")
+        os.makedirs(dest_dir, exist_ok=True)
+        dest_path = os.path.join(dest_dir, f"{output_name}.pt")
         
         shutil.copy2(best_pt_path, dest_path)
-        print(f"🎉 성공! [best.pt] 파일이 완성되어 봇 폴더에 저장되었습니다.")
+        print(f"🎉 성공! [{output_name}.pt] 파일이 완성되어 mobs 폴더에 저장되었습니다.")
         print(f"이제 기존의 [main.py]를 실행하시면 인공지능 사냥 봇이 작동합니다!")
         
     except Exception as e:
         print(f"파일 복사 중 오류가 발생했습니다. runs/detect/train/weights/best.pt 파일을 직접 꺼내주세요. 오류: {e}")
 
 if __name__ == "__main__":
-    train_model()
+    import sys
+    out_name = "best"
+    if len(sys.argv) > 1:
+        out_name = sys.argv[1]
+    train_model(out_name)
