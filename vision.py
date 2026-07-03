@@ -82,7 +82,30 @@ class VisionAgent:
                     cx = x1 + w // 2
                     cy = y1 + h // 2
                     monsters.append((cx, cy, w, h, box.conf[0].item()))
-        return monsters
+    def find_my_character(self, minimap_region=None):
+        """
+        미니맵에서 내 캐릭터(노란색 점)의 중심 (x, y) 좌표를 찾습니다.
+        """
+        if not minimap_region:
+            minimap_region = {'top': 0, 'left': 0, 'width': 400, 'height': 300}
+            
+        img = self.get_screen(minimap_region)
+        hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+        
+        # 메이플스토리 미니맵 노란점 색상 범위
+        lower_yellow = np.array([20, 100, 100])
+        upper_yellow = np.array([30, 255, 255])
+        
+        mask = cv2.inRange(hsv, lower_yellow, upper_yellow)
+        
+        # 노란색 픽셀들의 무게중심(좌표 평균) 계산
+        y_coords, x_coords = np.where(mask > 0)
+        
+        if len(x_coords) > 0 and len(y_coords) > 0:
+            cx = int(np.mean(x_coords))
+            cy = int(np.mean(y_coords))
+            return (cx, cy)
+        return None
 
 if __name__ == "__main__":
     # Test block

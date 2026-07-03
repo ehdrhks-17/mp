@@ -1,99 +1,125 @@
 import sys
-from PyQt6.QtWidgets import QApplication, QWidget, QPushButton, QVBoxLayout, QLabel
+import os
+import glob
+from PyQt6.QtWidgets import (QApplication, QWidget, QPushButton, QVBoxLayout, 
+                             QLabel, QComboBox, QHBoxLayout)
 from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QFont, QColor
-from bot_logic import BotThread
+from PyQt6.QtGui import QFont
 
-class OverlayUI(QWidget):
+# bot_logic과 map_editor는 나중에 통합 연결됩니다.
+# from bot_logic import BotThread
+import subprocess
+
+class MainGUI(QWidget):
     def __init__(self):
         super().__init__()
         self.bot_thread = None
         
+        # 디렉토리 체크
+        os.makedirs("maps", exist_ok=True)
+        
         self.initUI()
+        self.refresh_lists()
 
     def initUI(self):
-        # 윈도우 속성 설정: 항상 위, 프레임 없음, 포커스 받지 않음 (게임 창 유지)
-        self.setWindowFlags(
-            Qt.WindowType.WindowStaysOnTopHint |
-            Qt.WindowType.FramelessWindowHint |
-            Qt.WindowType.WindowDoesNotAcceptFocus
-        )
-        # 반투명 배경
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        self.setWindowOpacity(0.8)
+        # 윈도우 속성 설정 (항상 위)
+        self.setWindowFlags(Qt.WindowType.WindowStaysOnTopHint)
+        self.setStyleSheet("background-color: #2b2b2b; color: white;")
         
-        # 레이아웃 및 스타일 설정
         layout = QVBoxLayout()
         
-        self.log_label = QLabel("준비 완료", self)
-        self.log_label.setStyleSheet("color: white; background-color: rgba(0, 0, 0, 150); padding: 5px;")
-        font = QFont("Malgun Gothic", 12)
-        font.setBold(True)
-        self.log_label.setFont(font)
+        title = QLabel("🍁 메이플 봇 제어반")
+        title.setFont(QFont("Malgun Gothic", 24, QFont.Weight.Bold))
+        title.setStyleSheet("color: #4CAF50;")
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(title)
         
-        self.toggle_btn = QPushButton('▶ 사냥 시작', self)
-        # 버튼을 안구 마우스로 클릭하기 쉽게 아주 크게 만듭니다.
-        self.toggle_btn.setFixedSize(250, 150) 
-        self.toggle_btn.setFont(QFont("Malgun Gothic", 24, QFont.Weight.Bold))
-        self.toggle_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #4CAF50;
-                color: white;
-                border-radius: 20px;
-                border: 3px solid #2E7D32;
-            }
-            QPushButton:hover {
-                background-color: #45a049;
-            }
-        """)
+        # 1. 맵 선택기
+        map_layout = QVBoxLayout()
+        map_label = QLabel("🗺️ 사냥터 맵 파일 선택")
+        map_label.setFont(QFont("Malgun Gothic", 14, QFont.Weight.Bold))
+        self.map_combo = QComboBox()
+        self.map_combo.setStyleSheet("padding: 10px; font-size: 16px; background-color: #444;")
+        map_layout.addWidget(map_label)
+        map_layout.addWidget(self.map_combo)
+        layout.addLayout(map_layout)
+        
+        # 2. 몬스터 인공지능 선택기
+        ai_layout = QVBoxLayout()
+        ai_label = QLabel("🧠 몬스터 인공지능(YOLO) 선택")
+        ai_label.setFont(QFont("Malgun Gothic", 14, QFont.Weight.Bold))
+        self.ai_combo = QComboBox()
+        self.ai_combo.setStyleSheet("padding: 10px; font-size: 16px; background-color: #444;")
+        ai_layout.addWidget(ai_label)
+        ai_layout.addWidget(self.ai_combo)
+        layout.addLayout(ai_layout)
+        
+        # 버튼 영역
+        btn_layout = QHBoxLayout()
+        
+        self.editor_btn = QPushButton('🛠️ 맵 에디터 열기')
+        self.editor_btn.setMinimumHeight(60)
+        self.editor_btn.setStyleSheet("background-color: #2196F3; font-size: 18px; font-weight: bold;")
+        self.editor_btn.clicked.connect(self.open_editor)
+        
+        self.refresh_btn = QPushButton('🔄 새로고침')
+        self.refresh_btn.setMinimumHeight(60)
+        self.refresh_btn.setStyleSheet("background-color: #757575; font-size: 18px; font-weight: bold;")
+        self.refresh_btn.clicked.connect(self.refresh_lists)
+        
+        btn_layout.addWidget(self.editor_btn)
+        btn_layout.addWidget(self.refresh_btn)
+        layout.addLayout(btn_layout)
+        
+        # 거대한 시작 버튼
+        self.toggle_btn = QPushButton('▶ 사냥 시작')
+        self.toggle_btn.setMinimumHeight(120)
+        self.toggle_btn.setFont(QFont("Malgun Gothic", 28, QFont.Weight.Bold))
+        self.toggle_btn.setStyleSheet("background-color: #4CAF50; border: 3px solid #388E3C; border-radius: 15px;")
         self.toggle_btn.clicked.connect(self.toggle_bot)
-
-        layout.addWidget(self.log_label)
         layout.addWidget(self.toggle_btn)
-        self.setLayout(layout)
 
-        # 화면 우측 하단 쪽에 배치 (임시 좌표)
-        self.setGeometry(100, 100, 300, 200)
-        self.setWindowTitle('Maple YOLO Bot')
+        self.setLayout(layout)
+        self.setGeometry(100, 100, 450, 550)
+        self.setWindowTitle('Maple YOLO Bot - Main GUI')
+
+    def refresh_lists(self):
+        # 맵 파일 불러오기 (.json)
+        self.map_combo.clear()
+        map_files = glob.glob(os.path.join("maps", "*.json"))
+        if map_files:
+            for f in map_files:
+                self.map_combo.addItem(os.path.basename(f))
+        else:
+            self.map_combo.addItem("저장된 맵이 없습니다.")
+            
+        # 가중치 파일 불러오기 (.pt)
+        self.ai_combo.clear()
+        # 현재 폴더의 .pt 파일들
+        pt_files = glob.glob("*.pt")
+        if pt_files:
+            for f in pt_files:
+                self.ai_combo.addItem(os.path.basename(f))
+        else:
+            self.ai_combo.addItem("기본 YOLO 모델 (yolov8n.pt)")
+
+    def open_editor(self):
+        # 맵 에디터 스크립트 실행 (별도 창으로 띄움)
+        subprocess.Popen([sys.executable, "map_editor.py"])
 
     def toggle_bot(self):
-        if self.bot_thread is None or not self.bot_thread.is_running:
-            # 시작
-            self.bot_thread = BotThread()
-            self.bot_thread.log_signal.connect(self.update_log)
-            self.bot_thread.stop_signal.connect(self.on_bot_stopped)
-            self.bot_thread.start()
-            
+        # TODO: bot_logic과 연결하여 선택된 맵과 가중치를 전달하고 스레드를 시작하는 로직 구현
+        if self.toggle_btn.text() == '▶ 사냥 시작':
             self.toggle_btn.setText("⏹ 사냥 정지")
-            self.toggle_btn.setStyleSheet("""
-                QPushButton {
-                    background-color: #f44336;
-                    color: white;
-                    border-radius: 20px;
-                    border: 3px solid #c62828;
-                }
-            """)
+            self.toggle_btn.setStyleSheet("background-color: #f44336; border: 3px solid #c62828; border-radius: 15px;")
+            print(f"[{self.map_combo.currentText()}] 맵과 [{self.ai_combo.currentText()}] AI로 사냥을 시작합니다.")
         else:
-            # 정지
-            self.bot_thread.stop_bot()
-            self.on_bot_stopped()
-
-    def on_bot_stopped(self):
-        self.toggle_btn.setText("▶ 사냥 시작")
-        self.toggle_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #4CAF50;
-                color: white;
-                border-radius: 20px;
-                border: 3px solid #2E7D32;
-            }
-        """)
-
-    def update_log(self, msg):
-        self.log_label.setText(msg)
+            self.toggle_btn.setText("▶ 사냥 시작")
+            self.toggle_btn.setStyleSheet("background-color: #4CAF50; border: 3px solid #388E3C; border-radius: 15px;")
+            print("사냥을 정지합니다.")
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)
-    ex = OverlayUI()
+    ex = MainGUI()
     ex.show()
     sys.exit(app.exec())
