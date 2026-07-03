@@ -6,21 +6,24 @@ import time
 import os
 
 class VisionAgent:
-    def __init__(self, yolo_model_path='best.pt'):
-        self.sct = mss.mss()
-        # 모니터 전체 해상도를 가져옵니다. 1번 모니터 기준.
-        self.monitor = self.sct.monitors[1]
-        
-        # YOLO 모델 로드 (파일이 없으면 경고 출력 후 None 처리)
+    def __init__(self, yolo_model_path=None):
+        self.yolo_model_path = yolo_model_path
         self.model = None
-        if os.path.exists(yolo_model_path):
+        if self.yolo_model_path and os.path.exists(self.yolo_model_path):
             try:
-                self.model = YOLO(yolo_model_path)
-                print(f"YOLO 모델({yolo_model_path}) 로드 성공.")
+                self.model = YOLO(self.yolo_model_path)
+                print(f"YOLO 모델({self.yolo_model_path}) 로드 성공.")
             except Exception as e:
                 print(f"YOLO 모델 로드 실패: {e}")
         else:
             print(f"경고: {yolo_model_path} 파일이 없습니다. YOLO 인식 없이 미니맵 타 유저 감지만 작동합니다.")
+
+        # 메인 모니터 화면 크기 가져오기
+        with mss.mss() as sct:
+            self.monitor = sct.monitors[1]
+            
+        self.nickname_img_path = "nickname.png"
+        self.sct = mss.mss()
 
     def get_screen(self, region=None):
         """지정된 영역(없으면 전체)의 화면을 캡처하여 OpenCV BGR 이미지로 반환"""
@@ -106,6 +109,46 @@ class VisionAgent:
             cy = int(np.mean(y_coords))
             return (cx, cy)
         return None
+
+    def capture_nickname(self):
+        """
+        화면 중앙 하단의 내 닉네임 간판 예상 영역을 캡처하여 저장합니다.
+        (사용자가 캐릭터를 중앙에 둔 상태에서 호출해야 함)
+        """
+        cx = self.monitor['width'] // 2
+        cy = self.monitor['height'] // 2
+        # 대략 캐릭터 발밑 부근 (닉네임 위치)
+        region = {'top': cy + 20, 'left': cx - 40, 'width': 80, 'height': 30}
+        img = self.get_screen(region)
+        cv2.imwrite(self.nickname_img_path, img)
+        return True
+
+    def find_nickname_pos(self):
+        """
+        화면 전체에서 닉네임 이미지를 찾아내고, 캐릭터의 정중앙 (X, Y)를 반환합니다.
+        """
+        if not os.path.exists(self.nickname_img_path):
+            # 닉네임 이미지가 없으면 화면 중앙 리턴
+            return (self.monitor['width'] // 2, self.monitor['height'] // 2)
+            
+        template = cv2.imread(self.nickname_img_path, cv2.IMREAD_COLOR)
+        if template is None:
+            return (self.monitor['width'] // 2, self.monitor['height'] // 2)
+            
+        screen = self.get_screen()
+        res = cv2.matchTemplate(screen, template, cv2.TM_CCOEFF_NORMED)
+        min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(res)
+        
+        threshold = 0.8
+        if max_val >= threshold:
+            # max_loc는 템플릿의 좌상단. 닉네임 간판의 중앙 위가 캐릭터 중심임.
+            nx, ny = max_loc
+            h, w, _ = template.shape
+            cx = nx + w // 2
+            cy = ny - 20 # 닉네임 간판보다 약간 위를 캐릭터 중앙으로 취급
+            return (cx, cy)
+            
+        return (self.monitor['width'] // 2, self.monitor['height'] // 2)
 
 if __name__ == "__main__":
     # Test block
