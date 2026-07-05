@@ -4,6 +4,7 @@ import json
 import os
 from vision import VisionAgent
 from controller import hold_key, let_go_key, tap_key
+from captcha_solver import CaptchaSolver
 
 class BotThread(QThread):
     log_signal = pyqtSignal(str)
@@ -41,10 +42,20 @@ class BotThread(QThread):
         # 모든 이동키 떼기
         for k in [k_left, k_right, k_up, k_down]:
             let_go_key(k)
+            
+        captcha = CaptchaSolver()
 
         while self.is_running:
+            # 0. 거탐(투명 도형 찾기) 검사
+            if captcha.check_and_solve():
+                self.log_signal.emit("🚨 거탐 해제 완료! 3초 대기 후 사냥을 재개합니다.")
+                time.sleep(3)
+                continue
+
             # 1. 내 캐릭터 정확한 위치 파악 (닉네임 기반)
-            my_cx, my_cy = self.vision.find_nickname_pos()
+            my_pos = self.vision.find_nickname_pos()
+            
+            my_cx, my_cy = my_pos
             
             # 2. 몬스터(YOLO) 감지 및 사냥 조건 판별
             monsters = self.vision.find_monsters()
