@@ -48,12 +48,9 @@ class CaptchaSolver:
         """
         초기에 도형이 투명해지기 전(카운트다운 중 흰색 바탕도형 상태일 때) 찾아냅니다.
         """
-        # 초기 락온 시엔 화면 전체를 블러 처리해서 부드럽게 타겟을 찾음
-        gray_frame = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
-        gray_frame = cv2.GaussianBlur(gray_frame, (5, 5), 0)
-
-        # Inpaint 대신 원본 프레임에서 흰색 바탕도형 찾기
-        hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
+        # 노이즈를 줄여 윤곽선을 부드럽게 잡기 위해 블러 적용
+        blurred_frame = cv2.GaussianBlur(frame_bgr, (5, 5), 0)
+        hsv = cv2.cvtColor(blurred_frame, cv2.COLOR_BGR2HSV)
 
         # 흰색 바탕도형 찾기 (채도가 낮고 명도가 높은 색)
         white_mask = cv2.inRange(hsv, np.array([0, 0, 200]), np.array([180, 30, 255]))
@@ -64,7 +61,8 @@ class CaptchaSolver:
         
         for c in contours_white:
             area = cv2.contourArea(c)
-            if 1500 < area < 10000:
+            # 흰색 도형의 크기 필터링 (너무 작거나 слишком 큰 것 제외)
+            if 1000 < area < 15000:
                 x, y, w, h = cv2.boundingRect(c)
                 extent = area / (w * h) if w * h > 0 else 0
                 aspect = w / float(h) if h > 0 else 0
@@ -74,12 +72,9 @@ class CaptchaSolver:
                     rx, ry, rw, rh = self.roi_rect
                     if not (rx <= x and x+w <= rx+rw and ry <= y and y+h <= ry+rh):
                         in_roi = False
-                else:
-                    if x >= 1280:
-                        in_roi = False
                 
-                # 좌측 게임 화면 내(또는 ROI 내), 비율이 아주 엄격한 1:1에 가깝고(도형), 속이 어느 정도 꽉 찬(extent) 것만 필터링
-                if in_roi and 0.95 < aspect < 1.05 and extent > 0.4:
+                # 비율 조건을 기존 0.95~1.05에서 0.8~1.25로 대폭 완화 (찌그러지거나 픽셀 깨짐 허용)
+                if in_roi and 0.8 < aspect < 1.25 and extent > 0.4:
                     if area > max_area:
                         max_area = area
                         best_white_box = (x, y, w, h)
