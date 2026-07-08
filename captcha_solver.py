@@ -114,21 +114,35 @@ class CaptchaSolver:
                 search_region = gray_frame[sy1:sy2, sx1:sx2]
                 
                 if search_region.shape[0] >= self.h and search_region.shape[1] >= self.w:
-                    # 마스크를 적용한 템플릿 매칭 (가운데가 뚫린 도넛 형태만 비교)
-                    res = cv2.matchTemplate(search_region, self.template, cv2.TM_CCORR_NORMED, mask=self.tm_mask)
-                    _, _, _, max_loc = cv2.minMaxLoc(res)
+                    best_score = -1
+                    best_loc = None
                     
-                    # 새로운 중심 좌표 계산
-                    best_x = sx1 + max_loc[0]
-                    best_y = sy1 + max_loc[1]
+                    # V13: 도형이 회전하는 것을 감안하여 36개 각도(0~350도)로 돌려가며 가장 똑같은 모양을 찾음
+                    for angle in range(0, 360, 10):
+                        M = cv2.getRotationMatrix2D((self.w // 2, self.h // 2), angle, 1.0)
+                        rotated_template = cv2.warpAffine(self.template, M, (self.w, self.h))
+                        rotated_mask = cv2.warpAffine(self.tm_mask, M, (self.w, self.h))
+                        
+                        # 마스크를 적용한 템플릿 매칭 (가운데가 뚫린 도넛 형태만 비교)
+                        res = cv2.matchTemplate(search_region, rotated_template, cv2.TM_CCORR_NORMED, mask=rotated_mask)
+                        _, max_val, _, max_loc = cv2.minMaxLoc(res)
+                        
+                        if max_val > best_score:
+                            best_score = max_val
+                            best_loc = max_loc
                     
-                    self.prev_x = best_x + self.w // 2
-                    self.prev_y = best_y + self.h // 2
-                    self.target_center = (self.prev_x, self.prev_y)
-                    
-                    # 마우스로 이동
-                    move_mouse(self.prev_x, self.prev_y)
-                    print(f"Tracking... Center: ({self.prev_x}, {self.prev_y})")
+                    if best_loc is not None:
+                        # 새로운 중심 좌표 계산
+                        best_x = sx1 + best_loc[0]
+                        best_y = sy1 + best_loc[1]
+                        
+                        self.prev_x = best_x + self.w // 2
+                        self.prev_y = best_y + self.h // 2
+                        self.target_center = (self.prev_x, self.prev_y)
+                        
+                        # 마우스로 이동
+                        move_mouse(self.prev_x, self.prev_y)
+                        print(f"Tracking... Center: ({self.prev_x}, {self.prev_y}), Score: {best_score:.2f}")
             
             time.sleep(0.05) # 20 FPS
             
