@@ -37,13 +37,13 @@ class CaptchaSolver:
         
         for c in contours_white:
             area = cv2.contourArea(c)
-            if 500 < area < 10000:
+            if 1500 < area < 10000:
                 x, y, w, h = cv2.boundingRect(c)
-                center_x = x + w//2
-                center_y = y + h//2
+                extent = area / (w * h) if w * h > 0 else 0
+                aspect = w / float(h) if h > 0 else 0
                 
-                # 돌바닥 팝업 영역 내부인지 확인
-                if 600 < center_x < 1100 and 300 < center_y < 700:
+                # 좌측 게임 화면 내, 비율이 아주 엄격한 1:1에 가깝고(도형), 속이 어느 정도 꽉 찬(extent) 것만 필터링 (말풍선 등 제외)
+                if x < 1280 and 0.95 < aspect < 1.05 and extent > 0.4:
                     if area > max_area:
                         max_area = area
                         best_white_box = (x, y, w, h)
