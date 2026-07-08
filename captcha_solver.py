@@ -8,74 +8,52 @@ class CaptchaSolver:
     def __init__(self):
         self.sct = mss.mss()
         self.monitor = self.sct.monitors[1]
-        
-        # 기본 제공 템플릿 모양 3가지 (별, 원, 세모) - 처음 선명할 때 잡기 위함
-        self.templates = {
-            'star': self._create_star_template(),
-            'circle': self._create_circle_template(),
-            'triangle': self._create_triangle_template()
-        }
 
-    def _create_star_template(self):
-        mask = np.zeros((50, 50), dtype=np.uint8)
-        pts = np.array([[25,5], [31,18], [45,18], [34,26], [38,40], [25,31], [12,40], [16,26], [5,18], [19,18]], np.int32)
-        cv2.fillPoly(mask, [pts], 255)
-        return mask
-
-    def _create_circle_template(self):
-        mask = np.zeros((50, 50), dtype=np.uint8)
-        cv2.circle(mask, (25, 25), 18, 255, -1)
-        return mask
-
-    def _create_triangle_template(self):
-        mask = np.zeros((50, 50), dtype=np.uint8)
-        pts = np.array([[25, 5], [5, 45], [45, 45]], np.int32)
-        cv2.fillPoly(mask, [pts], 255)
-        return mask
-
-    def find_initial_target(self, frame_gray, frame_bgr):
+    def find_initial_target(self, frame_bgr):
         """
-        초기에 도형이 투명해지기 전(또는 선명할 때) 모양을 찾아냅니다.
+        초기에 도형이 투명해지기 전(카운트다운 중 흰색 바탕도형 상태일 때) 찾아냅니다.
         """
-        # 마우스 포인터(핑크색 원 내부의 흰색 도형)를 진짜 타겟으로 오인하지 않도록 마스킹
+        # 마우스 포인터(핑크색 원 내부의 흰색 도형)를 진짜 타겟으로 오인하지 않도록 블러 처리
         hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
-        lower_pink = np.array([140, 100, 150])
-        upper_pink = np.array([170, 255, 255])
-        mask = cv2.inRange(hsv, lower_pink, upper_pink)
+        pink_mask = cv2.inRange(hsv, np.array([140, 100, 150]), np.array([170, 255, 255]))
+        contours, _ = cv2.findContours(pink_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         
-        # 핑크색 커서 영역을 부드럽게 뭉개서(Blur) 추적기가 마우스를 형체로 인식하지 못하게 함
-        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         for c in contours:
             if 100 < cv2.contourArea(c) < 5000:
                 x, y, w, h = cv2.boundingRect(c)
-                # 안전하게 영역 확장
-                x, y = max(0, x-10), max(0, y-10)
-                w, h = min(frame_gray.shape[1]-x, w+20), min(frame_gray.shape[0]-y, h+20)
-                
-                # BGR과 Gray 프레임 모두에서 마우스 포인터를 뭉개버림
-                roi_gray = frame_gray[y:y+h, x:x+w]
-                frame_gray[y:y+h, x:x+w] = cv2.medianBlur(roi_gray, 31)
-                
-                roi_bgr = frame_bgr[y:y+h, x:x+w]
-                frame_bgr[y:y+h, x:x+w] = cv2.medianBlur(roi_bgr, 31)
+                # 메이플 게임 화면(좌측)에 있는 핑크색만 블러
+                if x < 1280:
+                    x, y = max(0, x-10), max(0, y-10)
+                    w, h = min(frame_bgr.shape[1]-x, w+20), min(frame_bgr.shape[0]-y, h+20)
+                    roi_bgr = frame_bgr[y:y+h, x:x+w]
+                    frame_bgr[y:y+h, x:x+w] = cv2.medianBlur(roi_bgr, 31)
 
-        best_val = 0
-        best_loc = None
-        best_shape = None
+        # 흰색 바탕도형 찾기 (채도가 낮고 명도가 높은 색)
+        white_mask = cv2.inRange(hsv, np.array([0, 0, 200]), np.array([180, 30, 255]))
+        contours_white, _ = cv2.findContours(white_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         
-        for name, tmpl in self.templates.items():
-            res = cv2.matchTemplate(frame_gray, tmpl, cv2.TM_CCOEFF_NORMED)
-            _, max_val, _, max_loc = cv2.minMaxLoc(res)
-            
-            if max_val > best_val:
-                best_val = max_val
-                best_loc = max_loc
-                best_shape = name
+        best_white_box = None
+        max_area = 0
+        
+        for c in contours_white:
+            area = cv2.contourArea(c)
+            if 500 < area < 10000:
+                x, y, w, h = cv2.boundingRect(c)
+                center_x = x + w//2
+                center_y = y + h//2
                 
-        # 매칭률이 0.5 이상이면 찾은 것으로 간주 (배경 노이즈 고려)
-        if best_val >= 0.5 and best_loc is not None:
-            return (best_loc[0], best_loc[1], 50, 50), best_shape, best_val
-        return None, None, best_val
+                # 돌바닥 팝업 영역 내부인지 확인
+                if 600 < center_x < 1100 and 300 < center_y < 700:
+                    if area > max_area:
+                        max_area = area
+                        best_white_box = (x, y, w, h)
+                        
+        if best_white_box:
+            # 락온! 타겟 크기에 맞게 10픽셀 여유를 두고 박스 설정
+            x, y, w, h = best_white_box
+            return (max(0, x-10), max(0, y-10), w+20, h+20)
+            
+        return None
 
     def solve_captcha(self):
         """
@@ -91,12 +69,11 @@ class CaptchaSolver:
         while time.time() - search_start < 10.0:
             screenshot = np.array(self.sct.grab(self.monitor))
             frame_bgr = cv2.cvtColor(screenshot, cv2.COLOR_BGRA2BGR)
-            frame_gray = cv2.cvtColor(screenshot, cv2.COLOR_BGRA2GRAY)
             
-            bbox, shape_name, conf = self.find_initial_target(frame_gray, frame_bgr)
+            bbox = self.find_initial_target(frame_bgr)
             if bbox is not None:
                 initial_bbox = bbox
-                print(f"[거탐 AI] 초기 도형({shape_name}) 발견! 신뢰도: {conf:.2f} -> 위치: {initial_bbox}")
+                print(f"[거탐 AI] 초기 흰색 바탕도형 발견! -> 위치: {initial_bbox}")
                 break
                 
             time.sleep(0.1)
@@ -127,10 +104,11 @@ class CaptchaSolver:
             for c in contours:
                 if 100 < cv2.contourArea(c) < 5000:
                     x, y, w, h = cv2.boundingRect(c)
-                    x, y = max(0, x-10), max(0, y-10)
-                    w, h = min(frame.shape[1]-x, w+20), min(frame.shape[0]-y, h+20)
-                    roi = frame[y:y+h, x:x+w]
-                    frame[y:y+h, x:x+w] = cv2.medianBlur(roi, 31)
+                    if x < 1280:
+                        x, y = max(0, x-10), max(0, y-10)
+                        w, h = min(frame.shape[1]-x, w+20), min(frame.shape[0]-y, h+20)
+                        roi = frame[y:y+h, x:x+w]
+                        frame[y:y+h, x:x+w] = cv2.medianBlur(roi, 31)
             
             success, bbox = tracker.update(frame)
             
