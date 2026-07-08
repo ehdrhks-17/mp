@@ -13,16 +13,23 @@ class CaptchaSolver:
         """
         초기에 도형이 투명해지기 전(카운트다운 중 흰색 바탕도형 상태일 때) 찾아냅니다.
         """
-        # 마우스 커서의 핑크색 '테두리'만 찾아내서 얇게 지움 (투명 타겟 중심부 보존)
+        # 마우스 커서 주변 픽셀 평균으로 마우스를 덮은 후, 강하게 블러 처리 (V11)
         hsv_pre = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
         pink_mask = cv2.inRange(hsv_pre, np.array([130, 30, 50]), np.array([175, 255, 255]))
         
-        if cv2.countNonZero(pink_mask) > 0:
-            kernel = np.ones((3,3), np.uint8)
-            dilated_mask = cv2.dilate(pink_mask, kernel, iterations=1)
-            # 메이플 게임 화면(좌측)에 있는 마우스만 지움
-            dilated_mask[:, 1280:] = 0
-            frame_bgr = cv2.inpaint(frame_bgr, dilated_mask, 3, cv2.INPAINT_TELEA)
+        contours, _ = cv2.findContours(pink_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if contours:
+            best_c = max(contours, key=cv2.contourArea)
+            if cv2.contourArea(best_c) > 50:
+                x, y, w, h = cv2.boundingRect(best_c)
+                if x < 1280:
+                    cx, cy = x + w//2, y + h//2
+                    roi_bg = frame_bgr[max(0, cy-40):cy+40, max(0, cx-40):cx+40]
+                    if roi_bg.size > 0:
+                        avg_color = cv2.mean(roi_bg)[:3]
+                        cv2.rectangle(frame_bgr, (max(0, x-5), max(0, y-5)), (x+w+5, y+h+5), avg_color, -1)
+                        
+        frame_bgr = cv2.GaussianBlur(frame_bgr, (31, 31), 0)
 
         # Inpaint 처리된 이미지에서 흰색 바탕도형 찾기
         hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
@@ -97,16 +104,23 @@ class CaptchaSolver:
             frame_original = cv2.cvtColor(screenshot, cv2.COLOR_BGRA2BGR)
             hsv = cv2.cvtColor(frame_original, cv2.COLOR_BGR2HSV)
             
-            # 마우스 커서의 핑크색 '테두리'만 찾아내서 얇게 지움 (투명 타겟 중심부 보존)
+            # V11: 마우스 커서를 주변 평균 색상으로 덮은 후, 강하게 블러 처리하여 거시적 형태만 추적
             pink_mask = cv2.inRange(hsv, np.array([130, 30, 50]), np.array([175, 255, 255]))
+            tracker_frame = frame_original.copy()
             
-            if cv2.countNonZero(pink_mask) > 0:
-                kernel = np.ones((3,3), np.uint8)
-                dilated_mask = cv2.dilate(pink_mask, kernel, iterations=1)
-                dilated_mask[:, 1280:] = 0
-                tracker_frame = cv2.inpaint(frame_original, dilated_mask, 3, cv2.INPAINT_TELEA)
-            else:
-                tracker_frame = frame_original.copy()
+            contours, _ = cv2.findContours(pink_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            if contours:
+                best_c = max(contours, key=cv2.contourArea)
+                if cv2.contourArea(best_c) > 50:
+                    x, y, w, h = cv2.boundingRect(best_c)
+                    if x < 1280:
+                        cx, cy = x + w//2, y + h//2
+                        roi_bg = frame_original[max(0, cy-40):cy+40, max(0, cx-40):cx+40]
+                        if roi_bg.size > 0:
+                            avg_color = cv2.mean(roi_bg)[:3]
+                            cv2.rectangle(tracker_frame, (max(0, x-5), max(0, y-5)), (x+w+5, y+h+5), avg_color, -1)
+            
+            tracker_frame = cv2.GaussianBlur(tracker_frame, (31, 31), 0)
             
             success, bbox = tracker.update(tracker_frame)
             
