@@ -2,6 +2,7 @@ import cv2
 import numpy as np
 import mss
 import time
+import keyboard
 from controller import tap_key, click_mouse, move_mouse
 
 class CaptchaSolver:
@@ -11,9 +12,33 @@ class CaptchaSolver:
         self.tracking_started = False
         self.target_center = None
         
+        # Hotkeys & GUI states
+        self.is_paused = False
+        self.needs_roi_selection = False
+        self.roi_rect = None
+        
+        keyboard.add_hotkey('f10', self.toggle_pause)
+        keyboard.add_hotkey('f8', self.trigger_roi_selection)
+        
         # V14: 동적 밝기 추적 (Blob Tracking) 상태 변수
         self.prev_x = 0
         self.prev_y = 0
+
+        # V15: ORB + Optical Flow tracker attributes
+        self.orb_features = 500  # 기본 ORB 특징점 개수
+        self.min_keypoints = 10  # 폴백 결정 기준
+        self.orb = cv2.ORB_create(nfeatures=self.orb_features)
+        self.use_orb = False  # ORB 트래커 사용 여부 플래그
+        self.prev_gray = None  # 이전 프레임(그레이) 저장
+        self.prev_pts = None   # 이전 프레임의 특징점 좌표
+
+    def toggle_pause(self):
+        self.is_paused = not self.is_paused
+        print(f"[Hotkey] Tracking Paused: {self.is_paused}")
+        
+    def trigger_roi_selection(self):
+        self.needs_roi_selection = True
+        print("[Hotkey] Requested ROI selection.")
 
     def find_initial_target(self, frame_bgr):
         """
@@ -40,8 +65,17 @@ class CaptchaSolver:
                 extent = area / (w * h) if w * h > 0 else 0
                 aspect = w / float(h) if h > 0 else 0
                 
-                # 좌측 게임 화면 내, 비율이 아주 엄격한 1:1에 가깝고(도형), 속이 어느 정도 꽉 찬(extent) 것만 필터링 (말풍선 등 제외)
-                if x < 1280 and 0.95 < aspect < 1.05 and extent > 0.4:
+                in_roi = True
+                if self.roi_rect:
+                    rx, ry, rw, rh = self.roi_rect
+                    if not (rx <= x and x+w <= rx+rw and ry <= y and y+h <= ry+rh):
+                        in_roi = False
+                else:
+                    if x >= 1280:
+                        in_roi = False
+                
+                # 좌측 게임 화면 내(또는 ROI 내), 비율이 아주 엄격한 1:1에 가깝고(도형), 속이 어느 정도 꽉 찬(extent) 것만 필터링
+                if in_roi and 0.95 < aspect < 1.05 and extent > 0.4:
                     if area > max_area:
                         max_area = area
                         best_white_box = (x, y, w, h)
@@ -56,100 +90,218 @@ class CaptchaSolver:
             
         return None
 
-    def solve_captcha(self):
+    def initialize_feature_tracker(self, frame_bgr):
         """
-        거탐 팝업 시 호출됩니다.
+        V15: Initializes ORB features and optical flow tracking from the initial target.
         """
-        print("[거탐 AI] 도형 탐색 시작")
+        gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
         
-        # 1. 초기 도형 찾기 (선명할 때)
-        search_start = time.time()
+        # Create a mask around the target_center
+        mask = np.zeros_like(gray)
+        roi_size = 100
+        x = max(0, self.prev_x - roi_size // 2)
+        y = max(0, self.prev_y - roi_size // 2)
         
-        while time.time() - search_start < 10.0:
-            screenshot = np.array(self.sct.grab(self.monitor))
-            frame_bgr = cv2.cvtColor(screenshot, cv2.COLOR_BGRA2BGR)
+        # Ensure coordinates are within bounds
+        x = min(max(x, 0), gray.shape[1] - roi_size)
+        y = min(max(y, 0), gray.shape[0] - roi_size)
+        
+        cv2.rectangle(mask, (x, y), (x + roi_size, y + roi_size), 255, -1)
+        
+        # Detect ORB keypoints
+        keypoints = self.orb.detect(gray, mask)
+        
+        if len(keypoints) >= self.min_keypoints:
+            self.prev_pts = np.array([[kp.pt] for kp in keypoints], dtype=np.float32)
+            self.prev_gray = gray
+            print(f"[V15] ORB Tracker initialized with {len(keypoints)} keypoints.")
+            return True
             
-            if self.find_initial_target(frame_bgr):
-                break
-                
-            time.sleep(0.1)
-            
-        if not self.tracking_started:
-            print("[거탐 AI] 10초 동안 명확한 도형을 찾지 못했습니다.")
+        print("[V15] Failed to initialize ORB tracker (not enough keypoints).")
+        return False
+        
+    def update_feature_tracker(self, frame_bgr):
+        """
+        V15: Updates tracking using Lucas-Kanade optical flow.
+        """
+        if self.prev_pts is None or len(self.prev_pts) < self.min_keypoints:
             return False
             
-        # 3. 투명해지는 도형 실시간 추적 및 마우스 이동
-        track_start = time.time()
-        while time.time() - track_start < 25.0: # 거탐 지속시간 동안 유지
+        gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
+        
+        # Calculate optical flow
+        lk_params = dict(winSize=(21, 21),
+                         maxLevel=3,
+                         criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.01))
+                         
+        next_pts, status, err = cv2.calcOpticalFlowPyrLK(self.prev_gray, gray, self.prev_pts, None, **lk_params)
+        
+        if next_pts is not None and status is not None:
+            good_new = next_pts[status == 1]
+            good_old = self.prev_pts[status == 1]
+            
+            if len(good_new) >= self.min_keypoints:
+                self.prev_gray = gray
+                self.prev_pts = good_new.reshape(-1, 1, 2)
+                
+                translation = np.mean(good_new - good_old, axis=0)
+                self.prev_x = int(self.prev_x + translation[0])
+                self.prev_y = int(self.prev_y + translation[1])
+                return True
+                
+        self.prev_pts = None
+        return False
+
+    def _draw_gui(self, frame, state_text):
+        if self.roi_rect:
+            x, y, w, h = self.roi_rect
+            cv2.rectangle(frame, (x, y), (x+w, y+h), (255, 255, 0), 2)
+            cv2.putText(frame, "ROI", (x, y-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
+            
+        color = (0, 0, 255) if self.is_paused else (0, 255, 0)
+        status = "PAUSED" if self.is_paused else state_text
+        cv2.putText(frame, f"State: {status} | F8: Set ROI | F10: Play/Pause", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+        
+        cv2.imshow("Captcha AI - Detection View", frame)
+
+    def run(self):
+        """
+        GUI 기반 메인 루프. F10으로 끄고 켜며, F8로 영역을 지정합니다.
+        """
+        print("[거탐 AI] 봇 실행됨. F8: 감지 영역 지정, F10: 시작/일시정지")
+        cv2.namedWindow("Captcha AI - Detection View", cv2.WINDOW_NORMAL)
+        
+        while True:
+            if self.needs_roi_selection:
+                screenshot = np.array(self.sct.grab(self.monitor))
+                frame = cv2.cvtColor(screenshot, cv2.COLOR_BGRA2BGR)
+                print("[GUI] 드래그하여 감지 영역을 설정하고 SPACE 또는 ENTER를 누르세요.")
+                roi = cv2.selectROI("Captcha AI - Detection View", frame, showCrosshair=True, fromCenter=False)
+                if roi[2] > 0 and roi[3] > 0:
+                    self.roi_rect = roi
+                    print(f"[GUI] 감지 영역 설정 완료: {self.roi_rect}")
+                self.needs_roi_selection = False
+
+            if self.is_paused:
+                screenshot = np.array(self.sct.grab(self.monitor))
+                vis_frame = cv2.cvtColor(screenshot, cv2.COLOR_BGRA2BGR)
+                self._draw_gui(vis_frame, "PAUSED")
+                if cv2.waitKey(50) & 0xFF == 27:
+                    break
+                continue
+
+            # --- SEARCH PHASE ---
+            self.tracking_started = False
+            self.use_orb = False
+            
             screenshot = np.array(self.sct.grab(self.monitor))
-            frame_original = cv2.cvtColor(screenshot, cv2.COLOR_BGRA2BGR)
-            # 1. 마우스 마스크 생성 (가장자리 흰/검 테두리까지 포함하도록 팽창)
-            hsv = cv2.cvtColor(frame_original, cv2.COLOR_BGR2HSV)
-            pink_mask = cv2.inRange(hsv, np.array([130, 30, 50]), np.array([175, 255, 255]))
-            kernel = np.ones((7,7), np.uint8)
-            mouse_mask = cv2.dilate(pink_mask, kernel, iterations=1)
-            mouse_mask[:, 1280:] = 0 # 좌측 게임화면만
+            frame_bgr = cv2.cvtColor(screenshot, cv2.COLOR_BGRA2BGR)
+            vis_frame = frame_bgr.copy()
             
-            # 회색조 변환 및 블러
-            gray_frame = cv2.cvtColor(frame_original, cv2.COLOR_BGR2GRAY)
-            gray_frame = cv2.GaussianBlur(gray_frame, (15, 15), 0)
+            if self.find_initial_target(frame_bgr):
+                if self.initialize_feature_tracker(frame_bgr):
+                    self.use_orb = True
+                else:
+                    self.use_orb = False
             
-            # 마우스가 있는 자리는 완전히 까맣게(0) 칠해버림 (계산에서 아예 배제)
-            gray_frame[mouse_mask > 0] = 0
-            
-            # 이전 위치 주변 150x150 영역만 잘라냄
-            search_size = 150
-            sx1 = max(0, self.prev_x - search_size // 2)
-            sy1 = max(0, self.prev_y - search_size // 2)
-            sx2 = min(frame_original.shape[1], self.prev_x + search_size // 2)
-            sy2 = min(frame_original.shape[0], self.prev_y + search_size // 2)
-            
-            roi = gray_frame[sy1:sy2, sx1:sx2]
-            
-            if roi.size > 0:
-                # 동적으로 임계값 설정 (ROI 내의 0이 아닌 평균 밝기보다 20만큼 더 밝은 영역 추출)
-                valid_pixels = roi[roi > 0]
-                if len(valid_pixels) > 0:
-                    mean_val = np.mean(valid_pixels)
-                    thresh_val = mean_val + 20
-                    _, thresh = cv2.threshold(roi, thresh_val, 255, cv2.THRESH_BINARY)
+            if not self.tracking_started:
+                self._draw_gui(vis_frame, "SEARCHING")
+                if cv2.waitKey(50) & 0xFF == 27:
+                    break
+                continue
+                
+            # --- TRACKING PHASE ---
+            track_start = time.time()
+            while time.time() - track_start < 25.0: # 거탐 지속시간 동안 유지
+                if self.is_paused or self.needs_roi_selection:
+                    break # F10이나 F8을 누르면 추적 중단하고 메인 루프로 복귀
                     
-                    contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-                    
-                    best_c = None
-                    min_dist = float('inf')
-                    
-                    # ROI 중심(이전 타겟 위치)과 가장 가까운 큰 덩어리를 찾음
-                    roi_center = (search_size//2, search_size//2)
-                    for c in contours:
-                        if cv2.contourArea(c) > 100: # 너무 작은 노이즈 무시
-                            M = cv2.moments(c)
-                            if M['m00'] > 0:
-                                cx = int(M['m10']/M['m00'])
-                                cy = int(M['m01']/M['m00'])
-                                dist = (cx - roi_center[0])**2 + (cy - roi_center[1])**2
-                                if dist < min_dist:
-                                    min_dist = dist
-                                    best_c = (cx, cy)
-                                    
-                    if best_c:
-                        # 전체 좌표계로 변환
-                        new_x = sx1 + best_c[0]
-                        new_y = sy1 + best_c[1]
+                screenshot = np.array(self.sct.grab(self.monitor))
+                frame_original = cv2.cvtColor(screenshot, cv2.COLOR_BGRA2BGR)
+                vis_frame = frame_original.copy()
+                
+                tracked = False
+                if self.use_orb:
+                    tracked = self.update_feature_tracker(frame_original)
+                    if not tracked:
+                        print("[V15] ORB tracking failed! Falling back to V14 Blob Tracking.")
+                        self.use_orb = False
                         
-                        # 부드럽게 이동 (Low-pass filter 적용하여 튀는 현상 방지)
-                        self.prev_x = int(self.prev_x * 0.5 + new_x * 0.5)
-                        self.prev_y = int(self.prev_y * 0.5 + new_y * 0.5)
-                        
-                        self.target_center = (self.prev_x, self.prev_y)
-                        move_mouse(self.prev_x, self.prev_y)
-                        print(f"Tracking... Center: ({self.prev_x}, {self.prev_y})")
+                if tracked:
+                    self.target_center = (self.prev_x, self.prev_y)
+                    move_mouse(self.prev_x, self.prev_y)
+                    # 시각화: ORB 특징점 및 타깃 중심
+                    if self.prev_pts is not None:
+                        for pt in self.prev_pts:
+                            cv2.circle(vis_frame, (int(pt[0][0]), int(pt[0][1])), 3, (0, 255, 0), -1)
+                    cv2.circle(vis_frame, (self.prev_x, self.prev_y), 5, (0, 0, 255), -1)
+                else:
+                    # 1. 마우스 마스크 생성
+                    hsv = cv2.cvtColor(frame_original, cv2.COLOR_BGR2HSV)
+                    pink_mask = cv2.inRange(hsv, np.array([130, 30, 50]), np.array([175, 255, 255]))
+                    kernel = np.ones((7,7), np.uint8)
+                    mouse_mask = cv2.dilate(pink_mask, kernel, iterations=1)
+                    
+                    if self.roi_rect:
+                        rx, ry, rw, rh = self.roi_rect
+                        mask_roi = np.zeros_like(mouse_mask)
+                        mask_roi[ry:ry+rh, rx:rx+rw] = 255
+                        mouse_mask = cv2.bitwise_and(mouse_mask, mask_roi)
+                    else:
+                        mouse_mask[:, 1280:] = 0 # 좌측 게임화면만
+                    
+                    gray_frame = cv2.cvtColor(frame_original, cv2.COLOR_BGR2GRAY)
+                    gray_frame = cv2.GaussianBlur(gray_frame, (15, 15), 0)
+                    gray_frame[mouse_mask > 0] = 0
+                    
+                    search_size = 150
+                    sx1 = max(0, self.prev_x - search_size // 2)
+                    sy1 = max(0, self.prev_y - search_size // 2)
+                    sx2 = min(frame_original.shape[1], self.prev_x + search_size // 2)
+                    sy2 = min(frame_original.shape[0], self.prev_y + search_size // 2)
+                    
+                    roi = gray_frame[sy1:sy2, sx1:sx2]
+                    
+                    if roi.size > 0:
+                        valid_pixels = roi[roi > 0]
+                        if len(valid_pixels) > 0:
+                            mean_val = np.mean(valid_pixels)
+                            thresh_val = mean_val + 20
+                            _, thresh = cv2.threshold(roi, thresh_val, 255, cv2.THRESH_BINARY)
+                            contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                            
+                            best_c = None
+                            min_dist = float('inf')
+                            roi_center = (search_size//2, search_size//2)
+                            
+                            for c in contours:
+                                if cv2.contourArea(c) > 100:
+                                    M = cv2.moments(c)
+                                    if M['m00'] > 0:
+                                        cx = int(M['m10']/M['m00'])
+                                        cy = int(M['m01']/M['m00'])
+                                        dist = (cx - roi_center[0])**2 + (cy - roi_center[1])**2
+                                        if dist < min_dist:
+                                            min_dist = dist
+                                            best_c = (cx, cy)
+                                            
+                            if best_c:
+                                new_x = sx1 + best_c[0]
+                                new_y = sy1 + best_c[1]
+                                self.prev_x = int(self.prev_x * 0.5 + new_x * 0.5)
+                                self.prev_y = int(self.prev_y * 0.5 + new_y * 0.5)
+                                self.target_center = (self.prev_x, self.prev_y)
+                                move_mouse(self.prev_x, self.prev_y)
+                                
+                                # 시각화: V14 폴백 추적
+                                cv2.circle(vis_frame, (self.prev_x, self.prev_y), 5, (255, 0, 0), -1)
+                
+                self._draw_gui(vis_frame, "TRACKING")
+                if cv2.waitKey(30) & 0xFF == 27:
+                    return
             
-            time.sleep(0.05) # 20 FPS
-            
-        print("[거탐 AI] 거탐 추적 사이클 종료.")
-        return True
+            print("[거탐 AI] 거탐 추적 사이클 종료. 다시 탐색 상태로 돌아갑니다.")
 
 if __name__ == "__main__":
     solver = CaptchaSolver()
-    solver.solve_captcha()
+    solver.run()
