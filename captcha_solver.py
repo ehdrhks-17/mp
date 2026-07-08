@@ -13,20 +13,19 @@ class CaptchaSolver:
         """
         초기에 도형이 투명해지기 전(카운트다운 중 흰색 바탕도형 상태일 때) 찾아냅니다.
         """
-        # 마우스 포인터(핑크색 원 내부의 흰색 도형)를 진짜 타겟으로 오인하지 않도록 블러 처리
+        # 마우스 포인터 핑크색 픽셀 영역만 Inpaint로 자연스럽게 지워버림
+        hsv_pre = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
+        pink_mask = cv2.inRange(hsv_pre, np.array([140, 100, 150]), np.array([170, 255, 255]))
+        if cv2.countNonZero(pink_mask) > 0:
+            kernel = np.ones((5,5), np.uint8)
+            dilated_mask = cv2.dilate(pink_mask, kernel, iterations=1)
+            # 메이플 게임 화면(좌측)에 있는 마우스만 지움
+            dilated_mask[:, 1280:] = 0
+            frame_bgr = cv2.inpaint(frame_bgr, dilated_mask, 3, cv2.INPAINT_TELEA)
+
+        # Inpaint 처리된 이미지에서 흰색 바탕도형 찾기
+        # 새로 hsv를 뽑아야 지워진 부분이 반영됨
         hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
-        pink_mask = cv2.inRange(hsv, np.array([140, 100, 150]), np.array([170, 255, 255]))
-        contours, _ = cv2.findContours(pink_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        
-        for c in contours:
-            if 100 < cv2.contourArea(c) < 5000:
-                x, y, w, h = cv2.boundingRect(c)
-                # 메이플 게임 화면(좌측)에 있는 핑크색만 블러
-                if x < 1280:
-                    x, y = max(0, x-10), max(0, y-10)
-                    w, h = min(frame_bgr.shape[1]-x, w+20), min(frame_bgr.shape[0]-y, h+20)
-                    roi_bgr = frame_bgr[y:y+h, x:x+w]
-                    frame_bgr[y:y+h, x:x+w] = cv2.medianBlur(roi_bgr, 31)
 
         # 흰색 바탕도형 찾기 (채도가 낮고 명도가 높은 색)
         white_mask = cv2.inRange(hsv, np.array([0, 0, 200]), np.array([180, 30, 255]))
@@ -95,22 +94,21 @@ class CaptchaSolver:
         track_start = time.time()
         while time.time() - track_start < 25.0: # 거탐 지속시간 동안 유지
             screenshot = np.array(self.sct.grab(self.monitor))
-            frame = cv2.cvtColor(screenshot, cv2.COLOR_BGRA2BGR)
+            frame_original = cv2.cvtColor(screenshot, cv2.COLOR_BGRA2BGR)
+            hsv = cv2.cvtColor(frame_original, cv2.COLOR_BGR2HSV)
             
-            # 실시간 추적 중에도 마우스 포인터를 화면에서 지워버려야 함 (안 그러면 마우스를 쫓아감)
-            hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+            # 마우스 커서 숨기기 (인페인팅)
             pink_mask = cv2.inRange(hsv, np.array([140, 100, 150]), np.array([170, 255, 255]))
-            contours, _ = cv2.findContours(pink_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            for c in contours:
-                if 100 < cv2.contourArea(c) < 5000:
-                    x, y, w, h = cv2.boundingRect(c)
-                    if x < 1280:
-                        x, y = max(0, x-10), max(0, y-10)
-                        w, h = min(frame.shape[1]-x, w+20), min(frame.shape[0]-y, h+20)
-                        roi = frame[y:y+h, x:x+w]
-                        frame[y:y+h, x:x+w] = cv2.medianBlur(roi, 31)
+            if cv2.countNonZero(pink_mask) > 0:
+                kernel = np.ones((5,5), np.uint8)
+                dilated_mask = cv2.dilate(pink_mask, kernel, iterations=1)
+                # 메이플 화면 영역(x<1280)만 마스킹 처리하여 매크로 UI는 건드리지 않음
+                dilated_mask[:, 1280:] = 0
+                tracker_frame = cv2.inpaint(frame_original, dilated_mask, 3, cv2.INPAINT_TELEA)
+            else:
+                tracker_frame = frame_original.copy()
             
-            success, bbox = tracker.update(frame)
+            success, bbox = tracker.update(tracker_frame)
             
             if success:
                 x, y, w, h = [int(v) for v in bbox]
