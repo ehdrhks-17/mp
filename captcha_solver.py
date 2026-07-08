@@ -13,22 +13,16 @@ class CaptchaSolver:
         """
         초기에 도형이 투명해지기 전(카운트다운 중 흰색 바탕도형 상태일 때) 찾아냅니다.
         """
-        # 마우스 포인터 핑크색 픽셀 영역 전체(바운딩 박스)를 Inpaint로 지움
+        # 마우스 커서의 핑크색 '테두리'만 찾아내서 얇게 지움 (투명 타겟 중심부 보존)
         hsv_pre = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
-        pink_mask = cv2.inRange(hsv_pre, np.array([130, 50, 100]), np.array([170, 255, 255])) # 범위를 더 넓힘
-        contours, _ = cv2.findContours(pink_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        full_mask = np.zeros_like(pink_mask)
-        has_pink = False
+        pink_mask = cv2.inRange(hsv_pre, np.array([130, 30, 50]), np.array([175, 255, 255]))
         
-        for c in contours:
-            if 50 < cv2.contourArea(c) < 5000:
-                x, y, w, h = cv2.boundingRect(c)
-                if x < 1280:
-                    cv2.rectangle(full_mask, (max(0, x-5), max(0, y-5)), (x+w+5, y+h+5), 255, -1)
-                    has_pink = True
-                    
-        if has_pink:
-            frame_bgr = cv2.inpaint(frame_bgr, full_mask, 3, cv2.INPAINT_TELEA)
+        if cv2.countNonZero(pink_mask) > 0:
+            kernel = np.ones((3,3), np.uint8)
+            dilated_mask = cv2.dilate(pink_mask, kernel, iterations=1)
+            # 메이플 게임 화면(좌측)에 있는 마우스만 지움
+            dilated_mask[:, 1280:] = 0
+            frame_bgr = cv2.inpaint(frame_bgr, dilated_mask, 3, cv2.INPAINT_TELEA)
 
         # Inpaint 처리된 이미지에서 흰색 바탕도형 찾기
         hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
@@ -103,21 +97,14 @@ class CaptchaSolver:
             frame_original = cv2.cvtColor(screenshot, cv2.COLOR_BGRA2BGR)
             hsv = cv2.cvtColor(frame_original, cv2.COLOR_BGR2HSV)
             
-            # 마우스 커서 전체 영역(바운딩 박스) 숨기기 (인페인팅)
-            pink_mask = cv2.inRange(hsv, np.array([130, 50, 100]), np.array([170, 255, 255])) # 범위를 더 넓힘
-            contours, _ = cv2.findContours(pink_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            full_mask = np.zeros_like(pink_mask)
-            has_pink = False
+            # 마우스 커서의 핑크색 '테두리'만 찾아내서 얇게 지움 (투명 타겟 중심부 보존)
+            pink_mask = cv2.inRange(hsv, np.array([130, 30, 50]), np.array([175, 255, 255]))
             
-            for c in contours:
-                if 50 < cv2.contourArea(c) < 5000:
-                    x, y, w, h = cv2.boundingRect(c)
-                    if x < 1280:
-                        cv2.rectangle(full_mask, (max(0, x-5), max(0, y-5)), (x+w+5, y+h+5), 255, -1)
-                        has_pink = True
-                        
-            if has_pink:
-                tracker_frame = cv2.inpaint(frame_original, full_mask, 3, cv2.INPAINT_TELEA)
+            if cv2.countNonZero(pink_mask) > 0:
+                kernel = np.ones((3,3), np.uint8)
+                dilated_mask = cv2.dilate(pink_mask, kernel, iterations=1)
+                dilated_mask[:, 1280:] = 0
+                tracker_frame = cv2.inpaint(frame_original, dilated_mask, 3, cv2.INPAINT_TELEA)
             else:
                 tracker_frame = frame_original.copy()
             
