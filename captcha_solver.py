@@ -13,7 +13,7 @@ class CaptchaSolver:
         self.target_center = None
         
         # Hotkeys & GUI states
-        self.is_paused = False
+        self.is_paused = True  # 기본 시작 상태를 OFF(일시정지)로 설정
         self.needs_roi_selection = False
         self.roi_rect = None
         
@@ -24,13 +24,17 @@ class CaptchaSolver:
         self.prev_x = 0
         self.prev_y = 0
 
-        # V15: ORB + Optical Flow tracker attributes
-        self.orb_features = 500  # 기본 ORB 특징점 개수
-        self.min_keypoints = 10  # 폴백 결정 기준
-        self.orb = cv2.ORB_create(nfeatures=self.orb_features)
-        self.use_orb = False  # ORB 트래커 사용 여부 플래그
-        self.prev_gray = None  # 이전 프레임(그레이) 저장
-        self.prev_pts = None   # 이전 프레임의 특징점 좌표
+        self.prev_x = 0
+        self.prev_y = 0
+
+        # V16: 모션 트래킹 (프레임 차이 + 가우시안 윈도우) 상태 변수
+        self.prev_gray = None
+        self.search_size = 120
+        # 미리 가우시안 가중치 맵을 계산해 둡니다.
+        x_grid, y_grid = np.meshgrid(np.arange(self.search_size), np.arange(self.search_size))
+        center = self.search_size / 2.0
+        sigma = self.search_size / 4.0
+        self.gaussian_weights = np.exp(-((x_grid - center)**2 + (y_grid - center)**2) / (2 * sigma**2))
 
     def toggle_pause(self):
         self.is_paused = not self.is_paused
@@ -85,72 +89,68 @@ class CaptchaSolver:
             self.prev_x = x + w // 2
             self.prev_y = y + h // 2
             self.tracking_started = True
-            print("Target locked! Using V14 Dynamic Blob Tracking.")
+            print("Target locked! Using V16 Gaussian Motion Tracking.")
             return True
             
         return None
 
-    def initialize_feature_tracker(self, frame_bgr):
+    def update_motion_tracker(self, frame_original):
         """
-        V15: Initializes ORB features and optical flow tracking from the initial target.
+        V16: 이전 프레임과 현재 프레임의 차이(Motion)를 계산하고,
+             가우시안 가중치를 적용하여 중앙 타깃의 움직임만 추적합니다.
         """
-        gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
-        
-        # Create a mask around the target_center
-        mask = np.zeros_like(gray)
-        roi_size = 100
-        x = max(0, self.prev_x - roi_size // 2)
-        y = max(0, self.prev_y - roi_size // 2)
-        
-        # Ensure coordinates are within bounds
-        x = min(max(x, 0), gray.shape[1] - roi_size)
-        y = min(max(y, 0), gray.shape[0] - roi_size)
-        
-        cv2.rectangle(mask, (x, y), (x + roi_size, y + roi_size), 255, -1)
-        
-        # Detect ORB keypoints
-        keypoints = self.orb.detect(gray, mask)
-        
-        if len(keypoints) >= self.min_keypoints:
-            self.prev_pts = np.array([[kp.pt] for kp in keypoints], dtype=np.float32)
-            self.prev_gray = gray
-            print(f"[V15] ORB Tracker initialized with {len(keypoints)} keypoints.")
-            return True
-            
-        print("[V15] Failed to initialize ORB tracker (not enough keypoints).")
-        return False
-        
-    def update_feature_tracker(self, frame_bgr):
-        """
-        V15: Updates tracking using Lucas-Kanade optical flow.
-        """
-        if self.prev_pts is None or len(self.prev_pts) < self.min_keypoints:
+        if self.prev_gray is None:
             return False
             
-        gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
+        # 1. 마우스가 움직이는 것을 모션으로 착각하지 않도록 분홍색 커서 가리기
+        hsv = cv2.cvtColor(frame_original, cv2.COLOR_BGR2HSV)
+        pink_mask = cv2.inRange(hsv, np.array([130, 30, 50]), np.array([175, 255, 255]))
+        kernel = np.ones((7,7), np.uint8)
+        mouse_mask = cv2.dilate(pink_mask, kernel, iterations=1)
         
-        # Calculate optical flow
-        lk_params = dict(winSize=(21, 21),
-                         maxLevel=3,
-                         criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.01))
-                         
-        next_pts, status, err = cv2.calcOpticalFlowPyrLK(self.prev_gray, gray, self.prev_pts, None, **lk_params)
+        gray = cv2.cvtColor(frame_original, cv2.COLOR_BGR2GRAY)
+        gray[mouse_mask > 0] = 0  # 마우스 커서 부분 블랙아웃
         
-        if next_pts is not None and status is not None:
-            good_new = next_pts[status == 1]
-            good_old = self.prev_pts[status == 1]
+        # 2. 프레임 차이(움직임) 계산
+        diff = cv2.absdiff(gray, self.prev_gray)
+        
+        # 3. 현재 타깃 중심 주변 영역(ROI)만 잘라내기
+        sx1 = max(0, self.prev_x - self.search_size // 2)
+        sy1 = max(0, self.prev_y - self.search_size // 2)
+        sx2 = min(frame_original.shape[1], self.prev_x + self.search_size // 2)
+        sy2 = min(frame_original.shape[0], self.prev_y + self.search_size // 2)
+        
+        roi_diff = diff[sy1:sy2, sx1:sx2]
+        
+        tracked = False
+        if roi_diff.size > 0:
+            # 잔상에서 확실한 움직임(픽셀값 15 이상 변화)만 추출
+            _, roi_thresh = cv2.threshold(roi_diff, 15, 255, cv2.THRESH_BINARY)
             
-            if len(good_new) >= self.min_keypoints:
-                self.prev_gray = gray
-                self.prev_pts = good_new.reshape(-1, 1, 2)
+            # 잘라낸 크기가 가우시안 윈도우 크기와 일치할 때만 가중치 적용 (화면 가장자리 예외 처리)
+            if roi_thresh.shape == self.gaussian_weights.shape:
+                weighted_roi = roi_thresh.astype(np.float32) * self.gaussian_weights
                 
-                translation = np.mean(good_new - good_old, axis=0)
-                self.prev_x = int(self.prev_x + translation[0])
-                self.prev_y = int(self.prev_y + translation[1])
-                return True
-                
-        self.prev_pts = None
-        return False
+                # 무게 중심(Center of Mass) 계산
+                M = cv2.moments(weighted_roi)
+                if M['m00'] > 0:
+                    cx = int(M['m10'] / M['m00'])
+                    cy = int(M['m01'] / M['m00'])
+                    
+                    new_x = sx1 + cx
+                    new_y = sy1 + cy
+                    
+                    # 마우스 부드럽게 이동 (50%만 반영하여 떨림 방지)
+                    self.prev_x = int(self.prev_x * 0.5 + new_x * 0.5)
+                    self.prev_y = int(self.prev_y * 0.5 + new_y * 0.5)
+                    tracked = True
+                    
+        # 현재 프레임을 다음 프레임 비교를 위해 저장
+        # 단, 마우스가 지워진 부분 때문에 다음 프레임에서 구멍이 파이는 것을 막기 위해 원본 그레이를 저장
+        clean_gray = cv2.cvtColor(frame_original, cv2.COLOR_BGR2GRAY)
+        self.prev_gray = clean_gray
+        
+        return tracked
 
     def _draw_gui(self, frame, state_text):
         if self.roi_rect:
@@ -192,17 +192,14 @@ class CaptchaSolver:
 
             # --- SEARCH PHASE ---
             self.tracking_started = False
-            self.use_orb = False
+            self.prev_gray = None
             
             screenshot = np.array(self.sct.grab(self.monitor))
             frame_bgr = cv2.cvtColor(screenshot, cv2.COLOR_BGRA2BGR)
             vis_frame = frame_bgr.copy()
             
             if self.find_initial_target(frame_bgr):
-                if self.initialize_feature_tracker(frame_bgr):
-                    self.use_orb = True
-                else:
-                    self.use_orb = False
+                self.prev_gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
             
             if not self.tracking_started:
                 self._draw_gui(vis_frame, "SEARCHING")
@@ -220,21 +217,15 @@ class CaptchaSolver:
                 frame_original = cv2.cvtColor(screenshot, cv2.COLOR_BGRA2BGR)
                 vis_frame = frame_original.copy()
                 
-                tracked = False
-                if self.use_orb:
-                    tracked = self.update_feature_tracker(frame_original)
-                    if not tracked:
-                        print("[V15] ORB tracking failed! Falling back to V14 Blob Tracking.")
-                        self.use_orb = False
+                tracked = self.update_motion_tracker(frame_original)
                         
                 if tracked:
                     self.target_center = (self.prev_x, self.prev_y)
                     move_mouse(self.prev_x, self.prev_y)
-                    # 시각화: ORB 특징점 및 타깃 중심
-                    if self.prev_pts is not None:
-                        for pt in self.prev_pts:
-                            cv2.circle(vis_frame, (int(pt[0][0]), int(pt[0][1])), 3, (0, 255, 0), -1)
+                    # 시각화: V16 모션 타깃 중심 및 추적 반경(가우시안 윈도우) 표시
+                    cv2.circle(vis_frame, (self.prev_x, self.prev_y), self.search_size // 2, (0, 255, 255), 1)
                     cv2.circle(vis_frame, (self.prev_x, self.prev_y), 5, (0, 0, 255), -1)
+                    print(f"[V16] Tracking... Center: ({self.prev_x}, {self.prev_y})")
                 else:
                     # 1. 마우스 마스크 생성
                     hsv = cv2.cvtColor(frame_original, cv2.COLOR_BGR2HSV)
