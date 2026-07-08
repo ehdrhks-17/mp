@@ -11,13 +11,9 @@ class CaptchaSolver:
         self.tracking_started = False
         self.target_center = None
         
-        # V12: 도넛 형태의 템플릿 매칭 상태 변수
-        self.template = None
-        self.tm_mask = None
+        # V14: 동적 밝기 추적 (Blob Tracking) 상태 변수
         self.prev_x = 0
         self.prev_y = 0
-        self.w = 0
-        self.h = 0
 
     def find_initial_target(self, frame_bgr):
         """
@@ -52,23 +48,10 @@ class CaptchaSolver:
                         
         if best_white_box:
             x, y, w, h = best_white_box
-            self.w, self.h = max(w, h), max(w, h) # 완벽한 정사각형으로 맞춤
-            self.prev_x = x + self.w // 2
-            self.prev_y = y + self.h // 2
-            
-            # 초기 타겟을 템플릿으로 저장
-            self.template = gray_frame[y:y+self.h, x:x+self.w].copy()
-            
-            # 도넛 마스크 생성 (가운데 60% 영역은 계산에서 완전히 무시 = 마우스가 지나가도 인식 안 함)
-            self.tm_mask = np.zeros((self.h, self.w), dtype=np.uint8)
-            center = (self.w // 2, self.h // 2)
-            outer_radius = min(self.w, self.h) // 2
-            inner_radius = int(outer_radius * 0.6) 
-            cv2.circle(self.tm_mask, center, outer_radius, 255, -1)
-            cv2.circle(self.tm_mask, center, inner_radius, 0, -1)
-            
+            self.prev_x = x + w // 2
+            self.prev_y = y + h // 2
             self.tracking_started = True
-            print("Target locked! Using Donut Template Matching.")
+            print("Target locked! Using V14 Dynamic Blob Tracking.")
             return True
             
         return None
@@ -100,49 +83,67 @@ class CaptchaSolver:
         while time.time() - track_start < 25.0: # 거탐 지속시간 동안 유지
             screenshot = np.array(self.sct.grab(self.monitor))
             frame_original = cv2.cvtColor(screenshot, cv2.COLOR_BGRA2BGR)
-            gray_frame = cv2.cvtColor(frame_original, cv2.COLOR_BGRA2GRAY)
-            gray_frame = cv2.GaussianBlur(gray_frame, (5, 5), 0)
+            # 1. 마우스 마스크 생성 (가장자리 흰/검 테두리까지 포함하도록 팽창)
+            hsv = cv2.cvtColor(frame_original, cv2.COLOR_BGR2HSV)
+            pink_mask = cv2.inRange(hsv, np.array([130, 30, 50]), np.array([175, 255, 255]))
+            kernel = np.ones((7,7), np.uint8)
+            mouse_mask = cv2.dilate(pink_mask, kernel, iterations=1)
+            mouse_mask[:, 1280:] = 0 # 좌측 게임화면만
             
-            if self.template is not None and self.tm_mask is not None:
-                # 이전 위치 주변 150x150 픽셀 영역에서만 탐색
-                search_size = 150
-                sx1 = max(0, self.prev_x - search_size // 2)
-                sy1 = max(0, self.prev_y - search_size // 2)
-                sx2 = min(frame_original.shape[1], self.prev_x + search_size // 2)
-                sy2 = min(frame_original.shape[0], self.prev_y + search_size // 2)
-                
-                search_region = gray_frame[sy1:sy2, sx1:sx2]
-                
-                if search_region.shape[0] >= self.h and search_region.shape[1] >= self.w:
-                    best_score = -1
-                    best_loc = None
+            # 회색조 변환 및 블러
+            gray_frame = cv2.cvtColor(frame_original, cv2.COLOR_BGR2GRAY)
+            gray_frame = cv2.GaussianBlur(gray_frame, (15, 15), 0)
+            
+            # 마우스가 있는 자리는 완전히 까맣게(0) 칠해버림 (계산에서 아예 배제)
+            gray_frame[mouse_mask > 0] = 0
+            
+            # 이전 위치 주변 150x150 영역만 잘라냄
+            search_size = 150
+            sx1 = max(0, self.prev_x - search_size // 2)
+            sy1 = max(0, self.prev_y - search_size // 2)
+            sx2 = min(frame_original.shape[1], self.prev_x + search_size // 2)
+            sy2 = min(frame_original.shape[0], self.prev_y + search_size // 2)
+            
+            roi = gray_frame[sy1:sy2, sx1:sx2]
+            
+            if roi.size > 0:
+                # 동적으로 임계값 설정 (ROI 내의 0이 아닌 평균 밝기보다 20만큼 더 밝은 영역 추출)
+                valid_pixels = roi[roi > 0]
+                if len(valid_pixels) > 0:
+                    mean_val = np.mean(valid_pixels)
+                    thresh_val = mean_val + 20
+                    _, thresh = cv2.threshold(roi, thresh_val, 255, cv2.THRESH_BINARY)
                     
-                    # V13: 도형이 회전하는 것을 감안하여 36개 각도(0~350도)로 돌려가며 가장 똑같은 모양을 찾음
-                    for angle in range(0, 360, 10):
-                        M = cv2.getRotationMatrix2D((self.w // 2, self.h // 2), angle, 1.0)
-                        rotated_template = cv2.warpAffine(self.template, M, (self.w, self.h))
-                        rotated_mask = cv2.warpAffine(self.tm_mask, M, (self.w, self.h))
-                        
-                        # 마스크를 적용한 템플릿 매칭 (가운데가 뚫린 도넛 형태만 비교)
-                        res = cv2.matchTemplate(search_region, rotated_template, cv2.TM_CCORR_NORMED, mask=rotated_mask)
-                        _, max_val, _, max_loc = cv2.minMaxLoc(res)
-                        
-                        if max_val > best_score:
-                            best_score = max_val
-                            best_loc = max_loc
+                    contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
                     
-                    if best_loc is not None:
-                        # 새로운 중심 좌표 계산
-                        best_x = sx1 + best_loc[0]
-                        best_y = sy1 + best_loc[1]
+                    best_c = None
+                    min_dist = float('inf')
+                    
+                    # ROI 중심(이전 타겟 위치)과 가장 가까운 큰 덩어리를 찾음
+                    roi_center = (search_size//2, search_size//2)
+                    for c in contours:
+                        if cv2.contourArea(c) > 100: # 너무 작은 노이즈 무시
+                            M = cv2.moments(c)
+                            if M['m00'] > 0:
+                                cx = int(M['m10']/M['m00'])
+                                cy = int(M['m01']/M['m00'])
+                                dist = (cx - roi_center[0])**2 + (cy - roi_center[1])**2
+                                if dist < min_dist:
+                                    min_dist = dist
+                                    best_c = (cx, cy)
+                                    
+                    if best_c:
+                        # 전체 좌표계로 변환
+                        new_x = sx1 + best_c[0]
+                        new_y = sy1 + best_c[1]
                         
-                        self.prev_x = best_x + self.w // 2
-                        self.prev_y = best_y + self.h // 2
+                        # 부드럽게 이동 (Low-pass filter 적용하여 튀는 현상 방지)
+                        self.prev_x = int(self.prev_x * 0.5 + new_x * 0.5)
+                        self.prev_y = int(self.prev_y * 0.5 + new_y * 0.5)
+                        
                         self.target_center = (self.prev_x, self.prev_y)
-                        
-                        # 마우스로 이동
                         move_mouse(self.prev_x, self.prev_y)
-                        print(f"Tracking... Center: ({self.prev_x}, {self.prev_y}), Score: {best_score:.2f}")
+                        print(f"Tracking... Center: ({self.prev_x}, {self.prev_y})")
             
             time.sleep(0.05) # 20 FPS
             
