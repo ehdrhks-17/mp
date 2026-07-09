@@ -38,8 +38,12 @@ class CaptchaSolver:
         diff_8u = np.clip(diff, 0, 255).astype(np.uint8)
         
         # 4. Threshold and morphology to clean up
-        _, thresh = cv2.threshold(diff_8u, 25, 255, cv2.THRESH_BINARY)
-        kernel = np.ones((5,5), np.uint8)
+        # Lower threshold to 15 to catch fainter distortions
+        _, thresh = cv2.threshold(diff_8u, 15, 255, cv2.THRESH_BINARY)
+        
+        # Heavy CLOSE to bridge broken shapes, followed by dilation
+        kernel = np.ones((9,9), np.uint8)
+        thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
         thresh = cv2.dilate(thresh, kernel, iterations=1)
         
         # 5. Filter out the Pink Mouse Pointer
@@ -137,32 +141,39 @@ class CaptchaSolver:
             best_meas = None
             best_rect = None
             
+            # Track coasting frames to dynamically expand search radius if lost
+            if not hasattr(self, 'coast_frames'):
+                self.coast_frames = 0
+                
+            dynamic_radius = 60 + (self.coast_frames * 20)
+            if dynamic_radius > 150:
+                dynamic_radius = 150
+            
             # Find the moving object closest to our prediction
             for c in contours:
                 area = cv2.contourArea(c)
-                if area > 80:  # Filter out tiny noise
+                if area > 40:  # Lowered to catch broken shapes
                     x, y, w, h = cv2.boundingRect(c)
                     
                     # Structural Filter: "테두리로만 이루어진걸 찾아야함"
-                    # The true star's motion doublet is sparse (outlines). The mouse or solid objects are dense.
-                    # We check the pixel density (extent) inside the bounding box.
                     roi_thresh = motion_mask[y:y+h, x:x+w]
                     density = cv2.countNonZero(roi_thresh) / (w * h)
                     
-                    # If it's a solid blob (density > 0.6), it's likely noise or the mouse pointer. Ignore it.
+                    # If it's a solid blob (density > 0.6), ignore it
                     if density > 0.6:
                         continue
                         
                     cx, cy = x + w/2, y + h/2
                     
                     dist = np.hypot(cx - pred_x, cy - pred_y)
-                    # 60 pixel search radius (prevents jumping to fake stars, tightly bounds expected motion)
-                    if dist < best_dist and dist < 60:
+                    # Use dynamic radius
+                    if dist < best_dist and dist < dynamic_radius:
                         best_dist = dist
                         best_meas = (cx, cy)
                         best_rect = (x, y, w, h)
             
             if best_meas:
+                self.coast_frames = 0 # Reset coasting
                 # Target found! Update Kalman filter
                 meas_cx, meas_cy = best_meas
                 measurement = np.array([[np.float32(meas_cx)], [np.float32(meas_cy)]])
@@ -179,6 +190,7 @@ class CaptchaSolver:
                 cv2.putText(debug_img, "TRACKING", (int(final_cx-tw/2), int(final_cy-th/2)-10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
             else:
                 # Target lost (occlusion/stopped). Coasting!
+                self.coast_frames += 1
                 final_cx, final_cy = pred_x, pred_y
                 tw, th = self.last_box_size
                 cv2.rectangle(debug_img, (int(final_cx-tw/2), int(final_cy-th/2)), 
