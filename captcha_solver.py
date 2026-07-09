@@ -38,8 +38,11 @@ class CaptchaSolver:
         diff_8u = np.clip(diff, 0, 255).astype(np.uint8)
         
         # 4. Threshold and morphology to clean up
-        # Lower threshold to 15 to catch fainter distortions
         _, thresh = cv2.threshold(diff_8u, 15, 255, cv2.THRESH_BINARY)
+        
+        # Remove 1-pixel noise (MORPH_OPEN)
+        kernel_small = np.ones((3,3), np.uint8)
+        thresh = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel_small)
         
         # Heavy CLOSE to bridge broken shapes, followed by dilation
         kernel = np.ones((9,9), np.uint8)
@@ -106,6 +109,7 @@ class CaptchaSolver:
                     if area > max_area:
                         max_area = area
                         best_rect = (x, y, w, h)
+                        self.target_contour = c
                         
         return best_rect
 
@@ -159,10 +163,13 @@ class CaptchaSolver:
                     roi_thresh = motion_mask[y:y+h, x:x+w]
                     density = cv2.countNonZero(roi_thresh) / (w * h)
                     
-                    # If it's a solid blob (density > 0.6), ignore it
-                    if density > 0.6:
-                        continue
-                        
+                    # Shape Filter: Compare moving shape to initial solid shape
+                    if hasattr(self, 'target_contour') and self.target_contour is not None:
+                        shape_score = cv2.matchShapes(self.target_contour, c, cv2.CONTOURS_MATCH_I1, 0)
+                        # The lower the score, the better the match. 0 is perfect.
+                        if shape_score > 0.4:  # If shape is too different from original star/circle, ignore it
+                            continue
+                    
                     cx, cy = x + w/2, y + h/2
                     
                     dist = np.hypot(cx - pred_x, cy - pred_y)
@@ -210,7 +217,9 @@ class CaptchaSolver:
 
         if target_center_screen:
             # 즉각적으로 마우스 이동
-            mouse.move(target_center_screen[0], target_center_screen[1], absolute=True, duration=0)
+            # (마우스가 화면 밖으로 튀는 현상 방지를 위해 시각적 추적이 완벽해질 때까지 임시 비활성화)
+            # mouse.move(target_center_screen[0], target_center_screen[1], absolute=True, duration=0)
+            pass
             
         if self.debug_callback:
             self.debug_callback(debug_img, preprocessed_3c)
