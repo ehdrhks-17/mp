@@ -20,7 +20,7 @@ class CaptchaSolver:
         gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
         gray_f = np.float32(gray)
         
-        if self.prev_gray is None:
+        if self.prev_gray is None or self.prev_gray.shape != gray_f.shape:
             self.prev_gray = gray_f
             return np.zeros_like(gray)
             
@@ -42,6 +42,21 @@ class CaptchaSolver:
         kernel = np.ones((5,5), np.uint8)
         thresh = cv2.dilate(thresh, kernel, iterations=1)
         
+        # 5. Filter out the Pink Mouse Pointer
+        # The mouse pointer is a solid object that creates massive motion blobs.
+        # We find its pink color (H: 140-170) and mask it out completely.
+        hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
+        lower_pink = np.array([135, 50, 150])
+        upper_pink = np.array([175, 255, 255])
+        pink_mask = cv2.inRange(hsv, lower_pink, upper_pink)
+        
+        # Dilate the pink mask heavily to cover the white borders of the crosshair
+        pink_kernel = np.ones((25, 25), np.uint8)
+        pink_mask = cv2.dilate(pink_mask, pink_kernel, iterations=1)
+        
+        # Erase the mouse pointer from the motion mask
+        thresh[pink_mask > 0] = 0
+        
         self.prev_gray = gray_f
         
         return thresh
@@ -58,7 +73,9 @@ class CaptchaSolver:
         self.kalman.processNoiseCov = np.array([[1,0,0,0],
                                                 [0,1,0,0],
                                                 [0,0,5,0],
-                                                [0,0,0,5]], np.float32) * 0.03
+                                                [0,0,0,5]], np.float32) * 0.05
+        self.kalman.measurementNoiseCov = np.array([[1,0],
+                                                    [0,1]], np.float32) * 1e-1
         
         self.kalman.statePre = np.array([[x], [y], [0], [0]], dtype=np.float32)
         self.kalman.statePost = np.array([[x], [y], [0], [0]], dtype=np.float32)
@@ -125,11 +142,22 @@ class CaptchaSolver:
                 area = cv2.contourArea(c)
                 if area > 80:  # Filter out tiny noise
                     x, y, w, h = cv2.boundingRect(c)
+                    
+                    # Structural Filter: "테두리로만 이루어진걸 찾아야함"
+                    # The true star's motion doublet is sparse (outlines). The mouse or solid objects are dense.
+                    # We check the pixel density (extent) inside the bounding box.
+                    roi_thresh = motion_mask[y:y+h, x:x+w]
+                    density = cv2.countNonZero(roi_thresh) / (w * h)
+                    
+                    # If it's a solid blob (density > 0.6), it's likely noise or the mouse pointer. Ignore it.
+                    if density > 0.6:
+                        continue
+                        
                     cx, cy = x + w/2, y + h/2
                     
                     dist = np.hypot(cx - pred_x, cy - pred_y)
-                    # 100 pixel search radius (prevents jumping to fake stars)
-                    if dist < best_dist and dist < 120:
+                    # 60 pixel search radius (prevents jumping to fake stars, tightly bounds expected motion)
+                    if dist < best_dist and dist < 60:
                         best_dist = dist
                         best_meas = (cx, cy)
                         best_rect = (x, y, w, h)

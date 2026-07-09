@@ -89,6 +89,31 @@ def let_go_key(key_name):
     if key_name in KEYS:
         release_key(KEYS[key_name])
 
+def move_mouse(x, y):
+    """마우스를 절대 좌표 (x, y)로 이동합니다."""
+    extra = ctypes.c_ulong(0)
+    ii_ = Input_I()
+    # 0x8000 = MOUSEEVENTF_ABSOLUTE, 0x0001 = MOUSEEVENTF_MOVE
+    # 좌표 변환: 0~65535로 스케일링 필요
+    # 화면 해상도를 1920x1080으로 가정하거나, win32api에서 받아올 수 있음.
+    # 단순화를 위해 SetCursorPos 사용 후 SendInput 빈 이벤트로 후킹 통과 유도.
+    ctypes.windll.user32.SetCursorPos(x, y)
+    
+def click_mouse():
+    """마우스 왼쪽 버튼 클릭."""
+    extra = ctypes.c_ulong(0)
+    ii_ = Input_I()
+    # 0x0002 = LEFTDOWN, 0x0004 = LEFTUP
+    ii_.mi = MouseInput(0, 0, 0, 0x0002, 0, ctypes.pointer(extra))
+    x = Input(ctypes.c_ulong(0), ii_)
+    ctypes.windll.user32.SendInput(1, ctypes.pointer(x), ctypes.sizeof(x))
+    
+    time.sleep(0.05)
+    
+    ii_.mi = MouseInput(0, 0, 0, 0x0004, 0, ctypes.pointer(extra))
+    x = Input(ctypes.c_ulong(0), ii_)
+    ctypes.windll.user32.SendInput(1, ctypes.pointer(x), ctypes.sizeof(x))
+
 if __name__ == "__main__":
     # Test block
     print("Testing Ctrl tap in 3 seconds...")

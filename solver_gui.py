@@ -18,6 +18,7 @@ class SolverGUI:
         
         self.solver = CaptchaSolver(debug_callback=self.on_frame_ready)
         self.is_running = False
+        self.roi_dict = None  # None이면 전체 화면
         
         self.setup_ui()
         
@@ -28,6 +29,9 @@ class SolverGUI:
         
         self.status_var = tk.StringVar(value="Status: STOPPED (Press F8 to Toggle)")
         ttk.Label(top_frame, textvariable=self.status_var, font=("Arial", 12, "bold")).pack(side=tk.LEFT, padx=10)
+        
+        self.roi_btn = ttk.Button(top_frame, text="🔍 캡처 영역 지정하기 (크롭)", command=self.select_roi)
+        self.roi_btn.pack(side=tk.RIGHT, padx=10)
         
         # Bottom panel for video feeds
         video_frame = ttk.Frame(self.root)
@@ -71,11 +75,33 @@ class SolverGUI:
             
         self.root.after(0, update_canvas)
 
+    def select_roi(self):
+        # 봇이 돌고 있다면 잠시 정지
+        was_running = self.is_running
+        self.is_running = False
+        
+        with mss.mss() as sct:
+            monitor = sct.monitors[1]
+            sct_img = sct.grab(monitor)
+            frame = np.array(sct_img)[:, :, :3]
+            
+            # 해상도가 너무 높으면 화면에 안 들어올 수 있으므로 cv2.selectROI 사용 전 확인
+            # OpenCV 창에서 마우스 드래그로 영역 선택 (Enter나 Space를 누르면 완료)
+            r = cv2.selectROI("Select Captcha Region (Press Enter to confirm)", frame, showCrosshair=True, fromCenter=False)
+            cv2.destroyWindow("Select Captcha Region (Press Enter to confirm)")
+            
+            x, y, w, h = r
+            if w > 0 and h > 0:
+                self.roi_dict = {"top": monitor["top"] + y, "left": monitor["left"] + x, "width": w, "height": h}
+                print(f"ROI selected: {self.roi_dict}")
+            else:
+                print("ROI selection cancelled. Using full screen.")
+                self.roi_dict = None
+                
+        self.is_running = was_running
+
     def bot_loop(self):
         with mss.mss() as sct:
-            # 기본적으로 전체 화면 캡처. 원한다면 bbox 지정 가능
-            monitor = sct.monitors[1] 
-            
             while True:
                 if keyboard.is_pressed('f8'):
                     self.is_running = not self.is_running
@@ -88,7 +114,8 @@ class SolverGUI:
                     time.sleep(0.3) # Debounce
                     
                 if self.is_running:
-                    # 화면 캡처
+                    # 화면 캡처 (선택된 ROI가 있으면 그것만, 없으면 모니터 전체)
+                    monitor = self.roi_dict if self.roi_dict else sct.monitors[1]
                     sct_img = sct.grab(monitor)
                     frame = np.array(sct_img)[:, :, :3] # BGRA to BGR
                     
