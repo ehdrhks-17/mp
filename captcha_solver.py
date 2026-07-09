@@ -16,12 +16,21 @@ class CaptchaSolver:
         self.last_box_size = (60, 60)
         
     def _preprocess(self, frame_bgr):
+        # 1. 흑백 변환
         gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
-        # CLAHE로 투명 윤곽선 대비 극대화
-        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8,8))
-        enhanced = clahe.apply(gray)
-        blurred = cv2.GaussianBlur(enhanced, (5, 5), 0)
-        return blurred
+        
+        # 2. 강한 가우시안 블러 (내부의 자잘한 바위 질감을 뭉개버려서 엣지에서 제외시킴)
+        blurred = cv2.GaussianBlur(gray, (9, 9), 0)
+        
+        # 3. Canny 윤곽선 추출 (오직 뾰족한 '별의 뼈대'만 하얀 선으로 남김)
+        # 임계값을 적절히 주어 뚜렷한 경계선만 취함
+        edges = cv2.Canny(blurred, 30, 100)
+        
+        # 4. Dilation (선 팽창) - 얇은 뼈대를 두껍게 칠해서 트래커가 꽉 물기 좋게 만듦
+        kernel = np.ones((3,3), np.uint8)
+        dilated = cv2.dilate(edges, kernel, iterations=2)
+        
+        return dilated
 
     def _init_kalman(self, x, y):
         self.kalman = cv2.KalmanFilter(4, 2)
@@ -37,8 +46,8 @@ class CaptchaSolver:
                                                 [0,0,5,0],
                                                 [0,0,0,5]], np.float32) * 0.03
         
-        self.kalman.statePre = np.array([[np.float32(x)], [np.float32(y)], [0.], [0.]])
-        self.kalman.statePost = np.array([[np.float32(x)], [np.float32(y)], [0.], [0.]])
+        self.kalman.statePre = np.array([[x], [y], [0], [0]], dtype=np.float32)
+        self.kalman.statePost = np.array([[x], [y], [0], [0]], dtype=np.float32)
 
     def find_initial_target(self, frame_bgr):
         hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
@@ -106,15 +115,13 @@ class CaptchaSolver:
                 dist = np.sqrt((meas_cx - pred_x)**2 + (meas_cy - pred_y)**2)
                 
                 # 가짜 별과 교차(Occlusion) 시 트래커가 순간적으로 튀는 현상 방어!
-                if dist > tw * 1.5: 
-                    # 쉴드 발동: 트래커가 속았다! 관성 예측값을 강제로 사용
+                if dist > tw * 2.5: # 거리를 2.5배로 늘려 관대하게 허용
+                    # 쉴드 발동: 트래커가 너무 멀리 튀었다면 관성 예측값을 강제로 사용
                     cv2.putText(debug_img, "OCCLUSION SHIELD!", (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
                     final_cx, final_cy = pred_x, pred_y
                     
-                    # 트래커를 예측 위치로 강제 재조정 (가짜 별을 계속 물지 않도록)
-                    new_box = (int(pred_x - tw/2), int(pred_y - th/2), tw, th)
-                    self.tracker = cv2.TrackerCSRT_create()
-                    self.tracker.init(preprocessed_3c, new_box)
+                    # 트래커를 파괴하지 않고, 칼만 필터의 예측값만으로 관성을 유지함!
+                    # (중간에 투명해진 상태로 트래커를 재시작하면 배경을 학습해버려서 추적이 영원히 망가짐)
                 else:
                     # 정상 추적 중: 칼만 필터에 측정값 먹여서 관성 궤도 교정
                     measurement = np.array([[np.float32(meas_cx)], [np.float32(meas_cy)]])
