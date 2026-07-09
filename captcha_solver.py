@@ -7,36 +7,50 @@ import time
 class CaptchaSolver:
     def __init__(self, debug_callback=None):
         self.sct = mss.mss()
-        self.monitor = self.sct.monitors[1]  # 전 화면 캡처용 (나중에 ROI 지정 가능)
+        self.monitor = self.sct.monitors[1]
         self.debug_callback = debug_callback
         
         self.state = "SEARCHING"
-        self.tracker = None
         self.kalman = None
         self.last_box_size = (60, 60)
+        self.prev_gray = None
         
     def _preprocess(self, frame_bgr):
-        # 1. 흑백 변환
+        # Motion Compensated Frame Differencing (The Ultimate Preprocessing)
         gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
+        gray_f = np.float32(gray)
         
-        # 2. 강한 가우시안 블러 (내부의 자잘한 바위 질감을 뭉개버려서 엣지에서 제외시킴)
-        blurred = cv2.GaussianBlur(gray, (9, 9), 0)
+        if self.prev_gray is None:
+            self.prev_gray = gray_f
+            return np.zeros_like(gray)
+            
+        # 1. Calculate background shift (Phase Correlation)
+        shift, _ = cv2.phaseCorrelate(self.prev_gray, gray_f)
+        dx, dy = shift
         
-        # 3. Canny 윤곽선 추출 (오직 뾰족한 '별의 뼈대'만 하얀 선으로 남김)
-        # 임계값을 적절히 주어 뚜렷한 경계선만 취함
-        edges = cv2.Canny(blurred, 30, 100)
+        # 2. Warp previous frame to align with current frame
+        rows, cols = gray.shape
+        M = np.float32([[1, 0, dx], [0, 1, dy]])
+        aligned_prev = cv2.warpAffine(self.prev_gray, M, (cols, rows), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
         
-        # 4. Dilation (선 팽창) - 얇은 뼈대를 두껍게 칠해서 트래커가 꽉 물기 좋게 만듦
-        kernel = np.ones((3,3), np.uint8)
-        dilated = cv2.dilate(edges, kernel, iterations=2)
+        # 3. Absolute difference to isolate ONLY moving objects
+        diff = cv2.absdiff(gray_f, aligned_prev)
+        diff_8u = np.clip(diff, 0, 255).astype(np.uint8)
         
-        return dilated
+        # 4. Threshold and morphology to clean up
+        _, thresh = cv2.threshold(diff_8u, 25, 255, cv2.THRESH_BINARY)
+        kernel = np.ones((5,5), np.uint8)
+        thresh = cv2.dilate(thresh, kernel, iterations=1)
+        
+        self.prev_gray = gray_f
+        
+        return thresh
 
     def _init_kalman(self, x, y):
         self.kalman = cv2.KalmanFilter(4, 2)
         self.kalman.measurementMatrix = np.array([[1, 0, 0, 0],
                                                   [0, 1, 0, 0]], np.float32)
-        # 속도 모델 (관성 유지)
+        # Constant Velocity Model
         self.kalman.transitionMatrix = np.array([[1, 0, 1, 0],
                                                  [0, 1, 0, 1],
                                                  [0, 0, 1, 0],
@@ -50,6 +64,7 @@ class CaptchaSolver:
         self.kalman.statePost = np.array([[x], [y], [0], [0]], dtype=np.float32)
 
     def find_initial_target(self, frame_bgr):
+        # Look for the solid white star initially
         hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
         lower_white = np.array([0, 0, 200])
         upper_white = np.array([180, 50, 255])
@@ -77,69 +92,81 @@ class CaptchaSolver:
         debug_img = frame_bgr.copy()
         target_center_screen = None
         
-        preprocessed = self._preprocess(frame_bgr)
-        # CSRT 트래커는 3채널을 요구함
-        preprocessed_3c = cv2.cvtColor(preprocessed, cv2.COLOR_GRAY2BGR)
+        # Get motion mask
+        motion_mask = self._preprocess(frame_bgr)
+        preprocessed_3c = cv2.cvtColor(motion_mask, cv2.COLOR_GRAY2BGR)
         
         if self.state == "SEARCHING":
             rect = self.find_initial_target(frame_bgr)
             if rect:
                 x, y, w, h = rect
-                # 락온! 트래커 시작
-                self.tracker = cv2.TrackerCSRT_create()
-                self.tracker.init(preprocessed_3c, (x, y, w, h))
-                
                 cx, cy = x + w/2, y + h/2
                 self._init_kalman(cx, cy)
                 self.last_box_size = (w, h)
-                
                 self.state = "TRACKING"
+                
                 cv2.rectangle(debug_img, (x, y), (x+w, y+h), (0, 255, 0), 2)
                 cv2.putText(debug_img, "LOCKED", (x, y-10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
         
         elif self.state == "TRACKING":
-            # 1. 칼만 필터 예측 (다음 프레임에 있어야 할 관성 위치)
+            # 1. Predict position
             pred = self.kalman.predict()
             pred_x, pred_y = float(pred[0][0]), float(pred[1][0])
             
-            # 2. CSRT 트래커 실제 측정
-            success, box = self.tracker.update(preprocessed_3c)
+            # 2. Find all moving objects in the motion mask
+            contours, _ = cv2.findContours(motion_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             
-            if success:
-                tx, ty, tw, th = [int(v) for v in box]
-                self.last_box_size = (tw, th)
-                meas_cx = tx + tw/2
-                meas_cy = ty + th/2
-                
-                # 예측된 위치와 실제 트래커가 찾은 위치의 거리 오차
-                dist = np.sqrt((meas_cx - pred_x)**2 + (meas_cy - pred_y)**2)
-                
-                # 가짜 별과 교차(Occlusion) 시 트래커가 순간적으로 튀는 현상 방어!
-                if dist > tw * 2.5: # 거리를 2.5배로 늘려 관대하게 허용
-                    # 쉴드 발동: 트래커가 너무 멀리 튀었다면 관성 예측값을 강제로 사용
-                    cv2.putText(debug_img, "OCCLUSION SHIELD!", (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
-                    final_cx, final_cy = pred_x, pred_y
+            best_dist = float('inf')
+            best_meas = None
+            best_rect = None
+            
+            # Find the moving object closest to our prediction
+            for c in contours:
+                area = cv2.contourArea(c)
+                if area > 80:  # Filter out tiny noise
+                    x, y, w, h = cv2.boundingRect(c)
+                    cx, cy = x + w/2, y + h/2
                     
-                    # 트래커를 파괴하지 않고, 칼만 필터의 예측값만으로 관성을 유지함!
-                    # (중간에 투명해진 상태로 트래커를 재시작하면 배경을 학습해버려서 추적이 영원히 망가짐)
-                else:
-                    # 정상 추적 중: 칼만 필터에 측정값 먹여서 관성 궤도 교정
-                    measurement = np.array([[np.float32(meas_cx)], [np.float32(meas_cy)]])
-                    self.kalman.correct(measurement)
-                    final_cx, final_cy = meas_cx, meas_cy
+                    dist = np.hypot(cx - pred_x, cy - pred_y)
+                    # 100 pixel search radius (prevents jumping to fake stars)
+                    if dist < best_dist and dist < 120:
+                        best_dist = dist
+                        best_meas = (cx, cy)
+                        best_rect = (x, y, w, h)
+            
+            if best_meas:
+                # Target found! Update Kalman filter
+                meas_cx, meas_cy = best_meas
+                measurement = np.array([[np.float32(meas_cx)], [np.float32(meas_cy)]])
+                self.kalman.correct(measurement)
+                final_cx, final_cy = meas_cx, meas_cy
+                
+                if best_rect:
+                    _, _, tw, th = best_rect
+                    self.last_box_size = (tw, th)
                     
-                # 시각화 박스 그리기
                 tw, th = self.last_box_size
                 cv2.rectangle(debug_img, (int(final_cx-tw/2), int(final_cy-th/2)), 
-                              (int(final_cx+tw/2), int(final_cy+th/2)), (255, 255, 0), 2)
-                cv2.circle(debug_img, (int(pred_x), int(pred_y)), 5, (0, 0, 255), -1) # 빨간점: 칼만 예측
-                cv2.circle(debug_img, (int(meas_cx), int(meas_cy)), 3, (0, 255, 0), -1) # 초록점: 트래커 측정
-                
-                target_center_screen = (int(final_cx) + screen_offset_x, int(final_cy) + screen_offset_y)
-                
+                              (int(final_cx+tw/2), int(final_cy+th/2)), (0, 255, 0), 2)
+                cv2.putText(debug_img, "TRACKING", (int(final_cx-tw/2), int(final_cy-th/2)-10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
             else:
-                self.state = "SEARCHING"
-                cv2.putText(debug_img, "LOST! SEARCHING...", (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+                # Target lost (occlusion/stopped). Coasting!
+                final_cx, final_cy = pred_x, pred_y
+                tw, th = self.last_box_size
+                cv2.rectangle(debug_img, (int(final_cx-tw/2), int(final_cy-th/2)), 
+                              (int(final_cx+tw/2), int(final_cy+th/2)), (0, 165, 255), 2)
+                cv2.putText(debug_img, "COASTING", (int(final_cx-tw/2), int(final_cy-th/2)-10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 165, 255), 2)
+                
+            # Draw prediction dot
+            cv2.circle(debug_img, (int(pred_x), int(pred_y)), 5, (0, 0, 255), -1)
+            
+            target_center_screen = (int(final_cx) + screen_offset_x, int(final_cy) + screen_offset_y)
+
+            # Optional debug: Draw all detected moving objects in red to show they are ignored
+            for c in contours:
+                if cv2.contourArea(c) > 80:
+                    x, y, w, h = cv2.boundingRect(c)
+                    cv2.rectangle(preprocessed_3c, (x, y), (x+w, y+h), (0, 0, 255), 1)
 
         if target_center_screen:
             # 즉각적으로 마우스 이동
